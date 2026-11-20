@@ -131,6 +131,8 @@ def select_tracks(info: dict, s: dict) -> dict:
     keep_unknown = s.get("keep_unknown_lang", True)
 
     def wanted(t):
+        if not keep_langs:          # no languages chosen = no filtering
+            return True
         return t["lang"] in keep_langs or (not t["lang"] and keep_unknown)
 
     audio = info.get("audio", [])

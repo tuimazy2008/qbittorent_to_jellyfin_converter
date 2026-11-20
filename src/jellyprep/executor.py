@@ -19,15 +19,18 @@ class NotEnoughSpace(Exception):
 
 def needed_bytes(plan: dict, link_fallback: str = "copy") -> int:
     """Bytes the plan will write (hardlinks are free unless they fall back to copying)."""
-    total = 0
+    total, inplace = 0, 0
     for a in plan["actions"]:
-        if a["action"] in ("transcode", "process"):
+        if a.get("inplace"):
+            # rewritten one file at a time, each replacing its original: the largest one is what's needed
+            inplace = max(inplace, a.get("estimate") or a["size"])
+        elif a["action"] in ("transcode", "process"):
             total += a.get("estimate") or a["size"]
         elif a["action"] == "remux":
             total += a["size"]
         elif a["action"] == "hardlink" and link_fallback == "copy" and not _same_device(a["src"], a["dst"]):
             total += a["size"]
-    return total
+    return total + inplace
 
 
 def check_space(plan: dict, min_free_gb: float, link_fallback: str = "copy") -> None:

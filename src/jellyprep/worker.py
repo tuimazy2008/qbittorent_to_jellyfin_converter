@@ -379,6 +379,7 @@ class Worker:
         if category not in self.db.categories():
             raise ValueError(f"Нет категории {category}")
         torrent_paths = [Path(map_path(t["content_path"], s["path_map"])) for t in qbit_client(s).torrents()]
+        torrent_inodes = _inodes(torrent_paths)
         known = self.db.known_paths()
         res = {"added": [], "torrent": [], "known": [], "empty": []}
         for entry in sorted(root.iterdir()):
@@ -387,8 +388,8 @@ class Worker:
             if str(entry) in known:
                 res["known"].append(entry.name)
                 continue
-            if any(_related(entry, tp) for tp in torrent_paths):
-                res["torrent"].append(entry.name)
+            if any(_related(entry, tp) for tp in torrent_paths) or _inodes([entry]) & torrent_inodes:
+                res["torrent"].append(entry.name)   # seeding, possibly through a hardlink (Sonarr/Radarr layouts)
                 continue
             try:
                 if not media.scan(entry).videos:
@@ -403,6 +404,21 @@ class Worker:
             res["added"].append(entry.name)
         self.trigger()
         return res
+
+
+def _inodes(paths: list[Path]) -> set[tuple[int, int]]:
+    """(device, inode) of every file under the paths: hardlinks share them."""
+    out = set()
+    for p in paths:
+        files = [p] if p.is_file() else (p.rglob("*") if p.is_dir() else [])
+        for f in files:
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            if f.is_file() and st.st_nlink > 1:
+                out.add((st.st_dev, st.st_ino))
+    return out
 
 
 def _related(entry: Path, torrent_path: Path) -> bool:

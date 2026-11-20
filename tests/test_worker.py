@@ -258,3 +258,26 @@ def test_reprocess_library_in_place(heavy_env, db):
     assert w.run_next_heavy() is True
     assert calls[0][0] == calls[0][1] == str(f)
     assert f.exists() and db.item(item["id"])["state"] == DONE
+
+
+def test_import_skips_hardlinks_of_seeding_torrents(heavy_env, db):
+    w, qb, tmp, calls = heavy_env
+    seeding = make_file(tmp / "media" / "downloads" / "Severance S01" / "Severance.S01E01.mkv")
+    linked = tmp / "media" / "tv" / "Severance" / "Season 1" / "Severance.S01E01.mkv"
+    linked.parent.mkdir(parents=True)
+    os.link(seeding, linked)                                    # Sonarr-style hardlink
+    make_file(tmp / "media" / "tv" / "The Kitchen" / "Kuhnya.s01.e01.mkv")
+    qb.torrents_list = [{**torrent("k" * 40, "Severance S01", "tv-sonarr"),
+                         "content_path": "/media/downloads/Severance S01"}]
+    res = w.import_folder(str(tmp / "media" / "tv"), "movies")
+    assert res["torrent"] == ["Severance"] and res["added"] == ["The Kitchen"]
+
+
+def test_inplace_space_check_counts_largest_file_only(tmp_path, monkeypatch):
+    from jellyprep import executor, media
+    plan = {"target": str(tmp_path), "actions": [
+        {"src": "a", "dst": "a", "action": "process", "inplace": True, "size": 10 * 1024**3, "estimate": 10 * 1024**3},
+        {"src": "b", "dst": "b", "action": "process", "inplace": True, "size": 12 * 1024**3, "estimate": 12 * 1024**3}]}
+    assert executor.needed_bytes(plan) == 12 * 1024**3
+    monkeypatch.setattr(media, "free_bytes", lambda p: 70 * 1024**3)
+    executor.check_space(plan, min_free_gb=50)              # 70 - 12 >= 50: fits

@@ -43,6 +43,8 @@ def match(tmdb: TMDB | None, kind: str, queries: list[str], year: int | None) ->
         s = top["score"]
         if len(ranked) > 1 and result["candidates"][1]["score"] >= s - 0.05:
             s -= 0.15  # ambiguous: two candidates look the same
+        if year is None and len(ranked) > 1:
+            s = min(s, 0.75)  # "Radar" with no year matches many shows exactly: always confirm
         result["chosen"], result["score"] = top, round(max(0.0, s), 3)
     return result
 

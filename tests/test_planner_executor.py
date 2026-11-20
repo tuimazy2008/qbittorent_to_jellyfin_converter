@@ -85,3 +85,15 @@ def test_remux_real_file(tmp_path):
     assert results[0]["method"] == "remux" and dst.exists()
     assert abs(media.duration(dst) - 3) < 0.5
     assert executor.verify(results) == []
+
+
+def test_unreadable_video_is_left_in_place(tmp_path, tmdb):
+    root = tmp_path / "Severance (Season 1)"
+    good = make_file(root / "Severance.S01E01.mkv")
+    bad = make_file(root / "Severance.S01E02.mkv")
+    s = media.scan(root)
+    ident = identify.identify(s, "tv", tmdb)
+    probe = lambda p: None if p == str(bad) else {"video": None}
+    plan = planner.build(ident, s, tmp_path / "lib", {}, probe=probe)
+    assert [a["src"] for a in plan["actions"]] == [str(good)]
+    assert any("не читается" in p for p in plan["problems"]) and "Severance.S01E02.mkv" in plan["skipped"]

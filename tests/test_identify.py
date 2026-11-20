@@ -109,3 +109,15 @@ def test_normal_season_is_not_remapped(tmp_path, tmdb):
     ident = identify.identify(media.scan(root), "tv", tmdb)
     assert [(e["season"], e["episode"]) for e in ident["episodes"]] == [(1, 1), (1, 9)]
     assert not ident["problems"]
+
+
+def test_no_year_and_several_candidates_needs_confirmation(tmp_path, tmdb):
+    from jellyprep.clients import Candidate
+    tmdb.tv.append(Candidate(24756, "Radar", "Radar", 2002, 3))
+    tmdb.tv.append(Candidate(317339, "Радар", "Radar", 2026, 3))
+    tmdb.seasons.update({24756: {1: 10}, 317339: {1: 4}})
+    root = tmp_path / "Radar"
+    for i in (1, 2):
+        make_file(root / "Season 1" / f"Radar.S01E{i:02d}.mkv")
+    ident = identify.identify(media.scan(root), "tv", tmdb)
+    assert ident["confidence"] <= 0.75

@@ -190,3 +190,10 @@ def test_real_output_has_no_stale_bitrate_tags(tmp_path):
     assert info["video"]["bps"] == 99_000_000
     transcode.process(str(tmp_path / "tagged.mkv"), str(dst), info, {**S, "hw_accel": "software"}, transcode=True)
     assert transcode.probe(dst)["video"]["bps"] < 20_000_000
+
+
+def test_empty_language_list_keeps_everything():
+    info = fake_info(audio=(("rus", 6), ("ukr", 2), ("", 2)), subs=("rus", "ukr"))
+    sel = transcode.select_tracks(info, {**S, "keep_langs": [], "voice_track": False})
+    assert len(sel["keep"]) == 3 and len(sel["subs_keep"]) == 2
+    assert transcode.processing_reasons(sel) == []

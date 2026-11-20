@@ -44,6 +44,7 @@ def build(ident: dict, s: Scan, dest_root: Path, settings: dict, probe: ProbeFn 
     actions: list[dict] = []
     problems: list[str] = []
     video_targets: dict[str, Path] = {}   # source rel → target path (without ext change for extras)
+    unreadable: list[str] = []
 
     def add_video(rel: str, dst_noext: Path) -> None:
         src = s.base / rel
@@ -57,7 +58,10 @@ def build(ident: dict, s: Scan, dest_root: Path, settings: dict, probe: ProbeFn 
             elif reasons := transcode.processing_reasons(transcode.select_tracks(info, settings)):
                 action = "process"
         elif probe and info is None:
-            problems.append(f"Не удалось прочитать файл: {rel}")
+            # broken or half-downloaded file: leave it where it is
+            problems.append(f"Файл не читается, не переносится: {rel}")
+            unreadable.append(rel)
+            return
         if action == "hardlink" and ext in remux:
             action, reasons = "remux", [f"контейнер {ext} → mkv"]
         dst = dst_noext.with_name(dst_noext.name + (ext if action == "hardlink" else ".mkv"))
@@ -128,7 +132,8 @@ def build(ident: dict, s: Scan, dest_root: Path, settings: dict, probe: ProbeFn 
     if occupied:
         problems.append(f"В библиотеке уже есть другие файлы с такими именами ({len(occupied)}): "
                         + ", ".join(occupied[:2]) + (" …" if len(occupied) > 2 else ""))
-    return {"target": target, "actions": actions, "problems": problems, "skipped": skipped + s.ignored}
+    return {"target": target, "actions": actions, "problems": problems,
+            "skipped": skipped + s.ignored + unreadable}
 
 
 def _extra_target(rel: str, s: Scan, video_targets: dict[str, Path]) -> Path | None:
