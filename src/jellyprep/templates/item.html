@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% from "_macros.html" import state %}
+{% block title %}{{ item.name }} · jellyprep{% endblock %}
+{% block content %}
+{% set id = item.ident or {} %}
+{% set plan = item.plan or {} %}
+<p><a href="/items">← Задачи</a></p>
+<h1>{{ item.name }}</h1>
+<p>{{ state(item.state) }} · категория <b>{{ item.category }}</b> · <code>{{ item.content_path }}</code></p>
+{% if item.error %}<p class="banner bad">{{ item.error }}</p>{% endif %}
+
+<div class="actions">
+  {% if item.state in ["review", "error"] and plan.actions %}
+  <form method="post" action="/items/{{ item.id }}/approve"><button>Подтвердить и выполнить</button></form>
+  {% endif %}
+  {% if item.state in ["review", "error", "approved"] and needs_window(plan) and s.night_only and not plan.run_now %}
+  <form method="post" action="/items/{{ item.id }}/run-now"><button class="secondary" title="Перекодирование обычно ждёт ночного окна {{ s.night_start }}–{{ s.night_end }}">{{ "Подтвердить и выполнить сейчас" if item.state != "approved" else "Выполнить сейчас, не ждать ночи" }}</button></form>
+  {% endif %}
+  {% if item.state not in ["done", "removed"] %}
+  <form method="post" action="/items/{{ item.id }}/reanalyze"><button class="secondary">Распознать заново</button></form>
+  <form method="post" action="/items/{{ item.id }}/skip"><button class="secondary">Пропустить</button></form>
+  {% endif %}
+</div>
+
+{% if item.state in ["done", "removed"] and plan.target %}
+<p class="hint">Задача уже выполнена. Чтобы переразложить или обработать её файлы заново (например, исправить сезоны или добавить
+«{{ VOICE_TITLE }}»), откройте <a href="/import">Перенос</a> и нажмите «Обработать» у новой библиотеки —
+папка <code>{{ plan.target.split("/")[-1] }}</code> станет новой задачей.</p>
+{% endif %}
+{% if s.dry_run and item.state == "approved" %}<p class="banner warn">Одобрено. Будет выполнено, когда выключите dry-run.</p>{% endif %}
+
+{% set problems = (id.problems or []) + (plan.problems or []) %}
+{% if problems %}
+<div class="banner warn"><b>Нужно проверить:</b><ul>{% for p in problems %}<li>{{ p }}</li>{% endfor %}</ul></div>
+{% endif %}
+
+{% if item.ident %}
+<form method="post" action="/items/{{ item.id }}/override" class="panel">
+<h2>Распознавание <small class="muted">уверенность {{ (id.confidence * 100)|round|int }}%</small></h2>
+<label class="inline">Тип
+  <select name="kind">
+    <option value="movie"{% if id.kind == "movie" %} selected{% endif %}>Фильм(ы)</option>
+    <option value="tv"{% if id.kind == "tv" %} selected{% endif %}>Сериал</option>
+  </select>
+</label>
+
+{% macro chooser(prefix, entry) %}
+{% set chosen = entry.chosen or {} %}
+<p class="muted">Искали: {{ entry.queries|join(", ") }}{% if entry.year %} · год {{ entry.year }}{% endif %}</p>
+<div class="cands">
+  {% for c in entry.candidates %}
+  <label class="cand"><input type="radio" name="{{ prefix }}_pick" value="{{ c.id }}"{% if chosen.id == c.id %} checked{% endif %}>
+    <span><b>{{ c.title }}</b>{% if c.original_title and c.original_title != c.title %} / {{ c.original_title }}{% endif %}
+      ({{ c.year or "?" }}) <small class="muted">TMDB {{ c.id }} · совпадение {{ (c.score * 100)|round|int }}%</small>
+      {% if c.overview %}<br><small class="muted">{{ c.overview[:180] }}{% if c.overview|length > 180 %}…{% endif %}</small>{% endif %}</span></label>
+  {% endfor %}
+  <label class="cand"><input type="radio" name="{{ prefix }}_pick" value="manual"{% if chosen and not chosen.id %} checked{% endif %}>
+    <span>Указать вручную:
+      <input name="{{ prefix }}_title" value="{{ chosen.title if not chosen.id else '' }}" placeholder="название">
+      <input name="{{ prefix }}_year" value="{{ chosen.year if not chosen.id and chosen.year else '' }}" placeholder="год" size="5"></span></label>
+  <label class="cand"><input type="radio" name="{{ prefix }}_pick" value="tmdb">
+    <span>Номер TMDB: <input name="{{ prefix }}_tmdb" placeholder="например 508" size="8">
+    <small class="muted">из адреса страницы на themoviedb.org</small></span></label>
+</div>
+{% endmacro %}
+
+{% if id.kind == "tv" %}
+  {{ chooser("show", id.show) }}
+  <h3>Серии</h3>
+  <div class="table-wrap"><table class="eps">
+    <tr><th>Файл</th><th>Сезон</th><th>Серия</th><th>Как определено</th></tr>
+    {% for e in id.episodes %}
+    <tr><td><small>{{ e.file }}</small><input type="hidden" name="ep_file::{{ loop.index }}" value="{{ e.file }}">
+      <input type="hidden" name="ep_os::{{ loop.index }}" value="{{ e.season }}"><input type="hidden" name="ep_oe::{{ loop.index }}" value="{{ e.episode }}"></td>
+      <td><input name="ep_s::{{ loop.index }}" value="{{ e.season }}" size="3" inputmode="numeric"></td>
+      <td><input name="ep_e::{{ loop.index }}" value="{{ e.episode }}" size="3" inputmode="numeric"></td>
+      <td><small class="muted">{{ e.how }}</small></td></tr>
+    {% endfor %}
+    {% for f in id.unmatched %}
+    {% set i = 1000 + loop.index %}
+    <tr class="warnrow"><td><small>{{ f }}</small><input type="hidden" name="ep_file::{{ i }}" value="{{ f }}"></td>
+      <td><input name="ep_s::{{ i }}" size="3" inputmode="numeric"></td>
+      <td><input name="ep_e::{{ i }}" size="3" inputmode="numeric"></td>
+      <td><small class="bad">номер не найден</small></td></tr>
+    {% endfor %}
+  </table></div>
+{% else %}
+  {% for m in id.movies %}
+  <div class="movie"><h3>{{ m.files|join(", ") }}</h3>{{ chooser("movie" ~ loop.index0, m) }}</div>
+  {% endfor %}
+{% endif %}
+<button type="submit" class="secondary">Применить исправления</button>
+</form>
+{% endif %}
+
+{% if plan.actions %}
+<h2>План{% if plan.target %} → <code>{{ plan.target }}</code>{% endif %}</h2>
+<div class="table-wrap"><table class="plan">
+  <tr><th>Действие</th><th>Исходный файл</th><th>В библиотеке</th><th>Размер</th></tr>
+  {% for a in plan.actions %}
+  <tr><td><span class="pill act-{{ a.action }}">{{ ACTION_LABELS.get(a.action, a.action) }}</span>{% if a.inplace %}<br><small class="muted">на месте</small>{% endif %}
+      {% if a.reasons %}<br><small class="muted">{{ a.reasons|join("; ") }}</small>{% endif %}</td>
+    <td><small>{{ a.src.split("/")[-1] }}</small>{% if a.summary %}<br><small class="muted">{{ a.summary }}</small>{% endif %}</td>
+    <td><small>{{ a.dst.replace(plan.target ~ "/", "") if plan.target else a.dst }}</small></td>
+    <td>{{ a.size|size }}{% if a.estimate %}<br><small class="muted">→ ≈{{ a.estimate|size }}</small>{% endif %}</td></tr>
+  {% endfor %}
+</table></div>
+{% if plan.skipped %}<details><summary>Пропущено файлов: {{ plan.skipped|length }}</summary><ul>{% for f in plan.skipped %}<li><small>{{ f }}</small></li>{% endfor %}</ul></details>{% endif %}
+{% endif %}
+
+{% if item.hash %}
+<h2>Раздача</h2>
+<p>Рейтинг {{ "%.2f"|format(item.ratio or 0) }}, раздаётся {{ item.seeding_time|days }} дн.
+  {% if cat %}Условие удаления: {% if not cat.delete_enabled %}выключено{% else %}{% if cat.seed_ratio is not none %}рейтинг ≥ {{ cat.seed_ratio }}{% endif %}{% if cat.seed_ratio is not none and cat.seed_days is not none %} или {% endif %}{% if cat.seed_days is not none %}{{ cat.seed_days|int }} дн.{% endif %}{% endif %}.{% endif %}
+  {% if item.state == "done" %}<br>{% if due[0] %}<b class="warn">{{ "Был бы удалён (dry-run)" if s.dry_run else "Будет удалён в ближайшем цикле" }}: {{ due[1] }}</b>{% else %}Пока не удаляется: {{ due[1] }}.{% endif %}{% endif %}
+</p>
+{% endif %}
+
+<h2>Журнал</h2>
+<ul class="log">{% for l in logs %}<li class="lv-{{ l.level }}"><small>{{ l.ts|ts }}</small> {{ l.message }}</li>{% else %}<li class="muted">пусто</li>{% endfor %}</ul>
+{% endblock %}

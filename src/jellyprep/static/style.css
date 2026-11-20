@@ -1,0 +1,79 @@
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #1d232b; --muted: #6a7480; --line: #dde1e6;
+  --accent: #3a6ee8; --accent-text: #fff; --ok: #1f8a4c; --warn: #a86400; --bad: #c4352b;
+  --warn-bg: #fff6e5; --bad-bg: #fdecea; --ok-bg: #e8f6ee; --card-sel: #eef3ff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171c; --panel: #1c2027; --text: #e4e8ee; --muted: #929ba6; --line: #2e343d;
+    --accent: #6d95f5; --accent-text: #0d1118; --ok: #5cc88a; --warn: #e2a74a; --bad: #f07b70;
+    --warn-bg: #2c2414; --bad-bg: #2e1b1a; --ok-bg: #16281e; --card-sel: #1e2a44;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+a { color: var(--accent); }
+code { font-size: 0.9em; background: var(--line); padding: 0 4px; border-radius: 4px; word-break: break-all; }
+main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+h1 { font-size: 1.5rem; margin: 0.5rem 0 1rem; }
+h2 { font-size: 1.15rem; margin: 1.6rem 0 0.6rem; }
+h3 { font-size: 1rem; margin: 1rem 0 0.4rem; word-break: break-all; }
+.top { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.top .logo { font-weight: 700; text-decoration: none; color: var(--text); }
+.top nav { display: flex; gap: 14px; flex-wrap: wrap; }
+.top nav a { text-decoration: none; }
+.top .status { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.top form { margin: 0; }
+.muted { color: var(--muted); }
+.ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+.lead { font-size: 1.05rem; }
+.hint { color: var(--muted); }
+.pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 0.8rem; background: var(--line); color: var(--text); white-space: nowrap; }
+.pill.ok, .st-done, .st-removed { background: var(--ok-bg); color: var(--ok); }
+.pill.warn, .st-review, .st-approved { background: var(--warn-bg); color: var(--warn); }
+.pill.bad, .st-error { background: var(--bad-bg); color: var(--bad); }
+.banner { padding: 10px 14px; border-radius: 8px; margin: 10px 0; }
+.banner.warn { background: var(--warn-bg); } .banner.bad { background: var(--bad-bg); }
+.banner ul { margin: 4px 0 0; padding-left: 20px; }
+button, .button { display: inline-block; font: inherit; padding: 8px 16px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: var(--accent-text); cursor: pointer; text-decoration: none; }
+button.secondary, .button.secondary { background: transparent; color: var(--accent); }
+button.small { padding: 3px 10px; font-size: 0.85rem; }
+button:disabled { opacity: 0.6; }
+input, select, textarea { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; max-width: 100%; }
+label { display: block; margin: 10px 0; }
+label > input:not([type=radio]):not([type=checkbox]), label > select, label > textarea { display: block; width: 100%; margin-top: 4px; }
+label.inline { display: inline-block; } label.inline select { display: inline-block; width: auto; }
+label small { display: block; color: var(--muted); margin-top: 2px; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0 16px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; margin: 8px 0; }
+.card { display: flex; gap: 10px; align-items: flex-start; margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); cursor: pointer; }
+.card:has(input:checked) { border-color: var(--accent); background: var(--card-sel); }
+.card p { margin: 4px 0 0; color: var(--muted); font-size: 0.92rem; }
+.card input { margin-top: 4px; }
+.steps { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; padding: 0; margin: 0 0 16px; counter-reset: s; }
+.steps li { counter-increment: s; padding: 3px 10px; border-radius: 999px; background: var(--line); font-size: 0.85rem; color: var(--muted); }
+.steps li::before { content: counter(s) ". "; }
+.steps li.cur { background: var(--accent); color: var(--accent-text); } .steps li.cur a { color: inherit; }
+.steps li.done a, .steps li a { color: inherit; text-decoration: none; }
+.wizard { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 4px 20px 20px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 4px 16px 16px; margin: 12px 0; }
+.nav-row { display: flex; justify-content: space-between; margin-top: 24px; }
+.test-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
+details.explain { margin: 10px 0; } details summary { cursor: pointer; color: var(--accent); }
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; background: var(--panel); }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 0.85rem; color: var(--muted); font-weight: 600; }
+table.summary th { width: 180px; }
+tr.warnrow td { background: var(--warn-bg); }
+.filters { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0 12px; }
+.filters a { text-decoration: none; } .filters a.cur { font-weight: 700; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; } .actions form { margin: 0; }
+.cands { display: grid; gap: 6px; margin-bottom: 10px; }
+.cand { display: flex; gap: 8px; align-items: flex-start; margin: 0; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; }
+.cand:has(input:checked) { border-color: var(--accent); background: var(--card-sel); }
+.cand input:not([type=radio]) { display: inline-block; width: auto; padding: 2px 6px; }
+.log { list-style: none; padding: 0; } .log li { padding: 3px 0; border-bottom: 1px solid var(--line); }
+.log .lv-error { color: var(--bad); } .log .lv-warning { color: var(--warn); }
+.act-remux, .act-process { background: var(--warn-bg); color: var(--warn); } .act-transcode { background: var(--card-sel); color: var(--accent); } .act-exists { color: var(--muted); }
+@media (max-width: 600px) { .top .status { margin-left: 0; } .wizard { padding: 4px 12px 16px; } }

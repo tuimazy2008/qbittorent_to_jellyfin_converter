@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Перенос из старых библиотек · jellyprep{% endblock %}
+{% macro cat_select(selected, form="") -%}
+<select name="category"{% if form %} form="{{ form }}"{% endif %}>
+  {% for c in cats %}<option value="{{ c.name }}"{% if c.name == selected %} selected{% endif %}>{{ c.name }} → {{ c.library_dir }}{% if not c.enabled %} (выкл.){% endif %}</option>{% endfor %}
+</select>
+{%- endmacro %}
+{% block content %}
+<h1>Перенос из старых библиотек</h1>
+<p class="lead">Файлы, которые лежат в старых папках и уже не раздаются, можно провести через jellyprep:
+он распознает их, при необходимости перекодирует и добавит дорожку «{{ VOICE_TITLE }}», положит в новую библиотеку
+и удалит оригинал после проверки.</p>
+<ul class="hint">
+  <li>Файлы, которые ещё раздаются в qBittorrent, пропускаются — их перенесёт торрентная часть после раздачи.</li>
+  <li>Каждый фильм или папка сериала становится отдельной задачей на странице «Задачи»: там видно, что будет сделано, и можно поправить распознавание.
+    Подтверждение работает по правилам выбранной категории.</li>
+  <li>Новая папка библиотеки (<code>{{ s.library_root }}</code>) тоже может быть источником: тогда файлы обрабатываются на месте — например, чтобы добавить дорожку «{{ VOICE_TITLE }}» к уже разложенным фильмам.</li>
+  {% if s.dry_run %}<li class="warn">Сейчас включён dry-run: задачи появятся, но ничего не будет перенесено и удалено.</li>{% endif %}
+</ul>
+
+{% if result %}
+<div class="banner {{ 'warn' if not result.ok else '' }}">
+  {% if result.ok %}
+  <b>{{ result.path }}</b> → категория {{ result.category }}:
+  добавлено задач <b>{{ result.added|length }}</b>,
+  пропущено (раздаются) {{ result.torrent|length }},
+  уже в работе {{ result.known|length }},
+  без видео {{ result.empty|length }}.
+  {% if result.torrent %}<details><summary>Раздаются</summary><small>{{ result.torrent|join(", ") }}</small></details>{% endif %}
+  {% if result.added %}<p><a href="/items?state=review">Открыть задачи на проверке →</a></p>{% endif %}
+  {% else %}<span class="bad">{{ result.message }}</span>{% endif %}
+</div>
+{% endif %}
+
+<h2>Библиотеки Jellyfin</h2>
+{% if jf_error %}<p class="bad">{{ jf_error }}</p>
+{% elif not sources %}<p class="muted">Jellyfin не подключён (шаг 8 мастера) — укажите папку вручную ниже.</p>
+{% else %}
+{% for src in sources %}<form id="imp{{ loop.index }}" method="post"></form>{% endfor %}
+<div class="table-wrap"><table>
+  <tr><th>Библиотека</th><th>Папка</th><th>В какую категорию</th><th>Удалить оригинал</th><th></th></tr>
+  {% for src in sources %}
+  {% set f = "imp" ~ loop.index %}
+  <tr>
+    <td><b>{{ src.library }}</b>{% if src.is_new %} <span class="pill ok">новая</span>{% endif %}</td>
+    <td><code>{{ src.path }}</code>{% if not src.exists %}<br><small class="bad">jellyprep не видит эту папку</small>{% endif %}
+      <input type="hidden" name="path" value="{{ src.path }}" form="{{ f }}"></td>
+    <td>{{ cat_select(src.suggest, f) }}</td>
+    <td>{% if src.is_new %}<small class="muted">обработка на месте</small><input type="hidden" name="delete_source" value="1" form="{{ f }}">
+      {% else %}<input type="checkbox" name="delete_source" value="1" checked form="{{ f }}">{% endif %}</td>
+    <td><button form="{{ f }}"{% if not src.exists %} disabled{% endif %}>{{ "Обработать" if src.is_new else "Перенести" }}</button></td>
+  </tr>
+  {% endfor %}
+</table></div>
+{% endif %}
+
+<h2>Другая папка</h2>
+<form method="post" class="panel">
+  <label>Папка (как её видит jellyprep) <input name="path" placeholder="/media/movies/adult_movies" required></label>
+  <label>Категория {{ cat_select("") }}</label>
+  <label class="inline"><input type="checkbox" name="delete_source" value="1" checked> удалить оригинал после переноса</label>
+  <p><button>Найти файлы</button></p>
+</form>
+{% endblock %}

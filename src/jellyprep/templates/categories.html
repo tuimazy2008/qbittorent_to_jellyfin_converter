@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Категории</h1>
+<p class="hint">Папка в библиотеке задаётся относительно <code>{{ s.library_root }}</code> (или полным путём).
+Удаление оригинала: при рейтинге ≥ указанного <b>или</b> через указанное число дней раздачи. Пустое поле — условие не используется.</p>
+<form method="post">
+  {% set full = True %}
+  {% include "_categories_table.html" %}
+  <p><button>Сохранить</button> <a class="button secondary" href="/setup/categories">Подтянуть новые категории из qBittorrent</a>
+    <a class="button secondary" href="/setup/jellyfin#libraries">Библиотеки в Jellyfin</a></p>
+</form>
+{% endblock %}

@@ -1,0 +1,21 @@
+# Example. Mount the same media folder qBittorrent uses, at the same path if you can:
+# then no path mapping is needed and hardlinks work (library and downloads on one disk).
+services:
+  jellyprep:
+    image: jellyprep:latest
+    build: .
+    container_name: jellyprep
+    user: "1000:1000"            # same owner as your media files
+    restart: unless-stopped
+    ports:
+      - "192.168.1.10:8765:8765" # bind to your LAN address only: the UI has no login
+    volumes:
+      - ./config:/config
+      - /path/to/media:/media
+    # GPU encoding (Intel Quick Sync / AMD via VAAPI). Remove both blocks if you have no iGPU/GPU.
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "992"                    # gid of the "render" group on the host: getent group render
+    environment:
+      - TZ=Europe/Berlin         # the night window for re-encoding uses this time zone

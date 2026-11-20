@@ -1,0 +1,371 @@
+{% extends "base.html" %}
+{% from "_macros.html" import card, test, secret %}
+{% block title %}Настройка · jellyprep{% endblock %}
+{% block content %}
+<ol class="steps">
+  {% for id, label in STEPS %}
+  <li class="{% if loop.index0 == idx %}cur{% elif loop.index0 < idx %}done{% endif %}">
+    {% if loop.index0 <= idx or s.setup_done %}<a href="/setup/{{ id }}">{{ label }}</a>{% else %}{{ label }}{% endif %}
+  </li>
+  {% endfor %}
+</ol>
+
+<form method="post" class="wizard">
+
+{% if step == "qbit" %}
+<h1>Подключение к qBittorrent</h1>
+<p class="lead">jellyprep берёт из qBittorrent список скачанных торрентов, раскладывает их в библиотеку Jellyfin,
+а потом удаляет оригиналы, когда раздача выполнена. Для этого нужен доступ к веб-интерфейсу qBittorrent
+(Настройки → Веб-интерфейс).</p>
+<label>Адрес веб-интерфейса
+  <input name="qbit_url" value="{{ s.qbit_url }}" required>
+  <small>Если jellyprep и qBittorrent в одной docker-сети: <code>http://qbittorrent:8080</code>.
+  Иначе — адрес компьютера с qBittorrent, например <code>http://192.168.1.10:8080</code>.</small>
+</label>
+<div class="grid2">
+  <label>Логин <input name="qbit_user" value="{{ s.qbit_user }}" autocomplete="off"></label>
+  <label>Пароль {{ secret("qbit_pass", s.qbit_pass) }}</label>
+</div>
+<p class="hint">Логин и пароль можно не заполнять, если в qBittorrent включено
+«Пропускать аутентификацию для клиентов из списка подсетей» и адрес jellyprep входит в этот список.</p>
+{{ test("qbit") }}
+
+{% elif step == "paths" %}
+<h1>Папки</h1>
+<p class="lead">qBittorrent и jellyprep могут видеть одни и те же файлы по разным путям (у каждого контейнера свои папки).
+Здесь проверяем, что jellyprep находит скачанное, и выбираем, куда класть библиотеку.</p>
+{% if path_error %}<p class="bad">Не удалось получить пути из qBittorrent: {{ path_error }}</p>{% endif %}
+{% if path_rows %}
+<table>
+  <tr><th>Категория</th><th>Путь в qBittorrent</th><th>Путь для jellyprep</th><th></th></tr>
+  {% for r in path_rows %}
+  <tr><td>{{ r.name }}</td><td><code>{{ r.qbit }}</code></td><td><code>{{ r.mapped }}</code></td>
+      <td>{% if r.exists %}<span class="ok">✓ виден</span>{% else %}<span class="bad">✗ не найден</span>{% endif %}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+<label>Соответствие путей
+  <textarea name="path_map_text" rows="3" placeholder="/downloads -> /media/downloads">{{ path_map_text }}</textarea>
+  <small>По одной строке: <code>путь в qBittorrent -> путь в jellyprep</code>. Если выше всё отмечено ✓, оставьте пустым.</small>
+</label>
+
+<h2>Куда класть библиотеку</h2>
+<label>Корневая папка библиотеки
+  <input name="library_root" value="{{ s.library_root }}" required>
+  <small>Внутри появятся подпапки для каждой категории. Эти подпапки потом добавляются в Jellyfin как библиотеки.</small>
+</label>
+<p class="hint">
+  {% if lib.exists %}Папка существует.{% else %}Папки пока нет — она будет создана.{% endif %}
+  {% if lib.free %}Свободно: {{ lib.free|size }}.{% endif %}
+  {% if lib.same_disk == True %}<span class="ok">✓ Тот же диск, что и загрузки — хардлинки будут работать.</span>
+  {% elif lib.same_disk == False %}<span class="bad">✗ Другой диск, чем загрузки — хардлинки невозможны, файлы придётся копировать.</span>{% endif %}
+</p>
+
+<h2>Если хардлинк невозможен</h2>
+<p class="hint"><b>Хардлинк</b> — это второе имя того же файла: в библиотеке файл появляется мгновенно и места не занимает,
+а торрент продолжает раздаваться. Он работает только в пределах одного диска.</p>
+<div class="cards">
+  {{ card("link_fallback", "copy", s.link_fallback, "Копировать файл",
+     "Файл будет занимать место дважды, пока торрент не удалят. Подходит, если библиотека на другом диске.", rec=True) }}
+  {{ card("link_fallback", "fail", s.link_fallback, "Остановиться с ошибкой",
+     "Ничего не копировать, показать ошибку. Подходит, если место на диске важнее всего.") }}
+</div>
+
+{% elif step == "categories" %}
+<h1>Категории</h1>
+<p class="lead">jellyprep обрабатывает только торренты из выбранных категорий qBittorrent. Для каждой категории
+укажите, что в ней лежит, в какую папку библиотеки класть и нужно ли спрашивать подтверждение.</p>
+{% if qbit_error %}<p class="bad">Не удалось получить категории: {{ qbit_error }}</p>{% endif %}
+<details class="explain"><summary>Что значат варианты</summary>
+<ul>
+  <li><b>Тип</b>: «Фильмы» — каждый видеофайл считается фильмом (сборники тоже). «Сериалы» — файлы раскладываются по сезонам и сериям. «Авто» — jellyprep решает сам по именам.</li>
+  <li><b>Подтверждение</b>: «Автоматически» — сразу раскладывать всё, что распознано. «Если уверен» — сразу только при высокой уверенности, остальное ждёт вас (рекомендуется). «Всегда спрашивать» — ничего без вашего «ОК».</li>
+</ul>
+</details>
+{% include "_categories_table.html" %}
+
+{% elif step == "tmdb" %}
+<h1>TMDB — база фильмов и сериалов</h1>
+<p class="lead">Чтобы Jellyfin правильно подобрал постеры и описания, jellyprep сверяет названия с базой TMDB
+и пишет в имя папки её номер, например <code>Love Actually (2003) [tmdbid-508]</code>.
+Без ключа сервис тоже работает, но всё будет попадать на ручную проверку.</p>
+<details class="explain" open><summary>Как получить ключ (бесплатно, 2 минуты)</summary>
+<ol>
+  <li>Зарегистрируйтесь на <a href="https://www.themoviedb.org/signup" target="_blank" rel="noopener">themoviedb.org</a>.</li>
+  <li>Откройте <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener">Настройки → API</a> и создайте ключ (тип «Developer», цель — личное использование).</li>
+  <li>Скопируйте <b>API Read Access Token</b> (длинный) или <b>API Key</b> (короткий) — подходит любой.</li>
+</ol>
+</details>
+<label>Ключ TMDB {{ secret("tmdb_key", s.tmdb_key, "вставьте ключ") }}</label>
+<label>Язык названий
+  <select name="tmdb_language">
+    {% for code, name in [("ru-RU","Русский"),("en-US","English"),("uk-UA","Українська"),("de-DE","Deutsch")] %}
+    <option value="{{ code }}"{% if s.tmdb_language == code %} selected{% endif %}>{{ name }}</option>
+    {% endfor %}
+  </select>
+  <small>На этом языке будут названия папок. Если перевода нет, берётся оригинальное название.</small>
+</label>
+{{ test("tmdb") }}
+
+{% elif step == "llm" %}
+<h1>Локальная модель <span class="pill">необязательно</span></h1>
+<p class="lead">Некоторые раздачи названы так, что их не разобрать правилами: транслит (<code>Vstat.na.nogi</code>),
+папки <code>Season 01</code> без названия, сборники. Такие случаи можно отдавать локальной языковой модели
+(например, Ollama на компьютере с видеокартой). В модель уходят только имена файлов и технические данные о видео —
+сами файлы никуда не передаются.</p>
+<p class="hint">Без модели всё работает: сложные случаи просто ждут вашего решения на странице торрента.
+Модель можно подключить позже в настройках. <b>Разбор через модель появится в версии 0.3</b>, сейчас сохраняется только подключение.</p>
+<div class="cards">
+  {{ card("llm_kind", "none", s.llm_kind, "Не использовать", "Сложные случаи решаете вы вручную.", rec=True) }}
+  {{ card("llm_kind", "ollama", s.llm_kind, "Ollama", "Адрес вида <code>http://192.168.1.20:11434</code>. На компьютере с Ollama нужно разрешить доступ по сети: <code>OLLAMA_HOST=0.0.0.0</code>.") }}
+  {{ card("llm_kind", "openai", s.llm_kind, "OpenAI-совместимый сервер", "LM Studio, llama.cpp server, vLLM и т.п. Адрес вида <code>http://192.168.1.20:1234/v1</code>.") }}
+</div>
+<div class="grid2">
+  <label>Адрес <input name="llm_url" value="{{ s.llm_url }}" placeholder="http://192.168.1.20:11434"></label>
+  <label>Модель <input name="llm_model" value="{{ s.llm_model }}" list="llm-models" placeholder="нажмите «Проверить», чтобы получить список"></label>
+</div>
+<datalist id="llm-models"></datalist>
+<label>Ключ API (если сервер его требует) {{ secret("llm_key", s.llm_key) }}</label>
+{{ test("llm") }}
+
+{% elif step == "video" %}
+<h1>Видео</h1>
+<p class="lead">Многие раздачи сделаны «с запасом»: 4K, огромный битрейт, HDR, редкие кодеки. Телевизор или телефон
+такое часто не тянет, и Jellyfin перекодирует фильм на лету при каждом просмотре — медленно и с подтормаживаниями.
+jellyprep может один раз заранее сделать копию в формате, который играет везде: <b>H.264, не больше 1080p</b>.
+Заодно освобождается место: такая копия обычно в 2–5 раз меньше оригинала.</p>
+<div class="cards">
+  {{ card("video_mode", "compat", s.video_mode, "Максимальная совместимость",
+     "Перекодировать всё, что больше 1080p, в HDR, не в H.264 (HEVC, XviD, MPEG-2), чересстрочное или с битрейтом выше порога. Файлы, которые и так в порядке, не трогаются.", rec=True) }}
+  {{ card("video_mode", "balanced", s.video_mode, "Только большое",
+     "Перекодировать только 4K и HDR. HEVC и прочие кодеки остаются как есть — на старых устройствах Jellyfin будет перекодировать их сам.") }}
+  {{ card("video_mode", "off", s.video_mode, "Не трогать видео",
+     "Видео всегда копируется без изменений. Звук и дорожки всё равно можно обработать на следующем шаге.") }}
+</div>
+
+<h2>Качество</h2>
+<p class="hint">Сколько данных в секунду оставлять для картинки 1080p. Меньшие разрешения получают пропорционально меньше.
+Если у оригинала битрейт ещё ниже, берётся меньшее значение — увеличивать размер нет смысла.</p>
+<div class="cards">
+  {{ card("video_quality", "small", s.video_quality, "Экономно (≈4 Мбит/с)", "≈3.5 ГБ на двухчасовой фильм. Для телефонов и небольших экранов.") }}
+  {{ card("video_quality", "standard", s.video_quality, "Обычно (≈6 Мбит/с)", "≈5.5 ГБ на фильм. На большом телевизоре почти не отличить от оригинала.", rec=True) }}
+  {{ card("video_quality", "high", s.video_quality, "Высокое (≈9 Мбит/с)", "≈8 ГБ на фильм. Для тех, кто смотрит вблизи на большом экране.") }}
+</div>
+<label>Порог битрейта для «Максимальной совместимости», Мбит/с
+  <input name="video_max_mbps" value="{{ s.video_max_mbps }}" inputmode="decimal">
+  <small>Фильмы с битрейтом видео выше порога перекодируются. 12 — типичная граница между «обычным» рипом и BluRay-ремуксом.</small>
+</label>
+
+<h2>Чем кодировать</h2>
+<p class="hint">Видеокарта (Intel Quick Sync, AMD) кодирует в десятки раз быстрее процессора и почти не нагружает сервер.
+Для этого в контейнер нужно передать устройство <code>/dev/dri</code> (см. README).</p>
+<div class="cards">
+  {{ card("hw_accel", "auto", s.hw_accel, "Автоматически", "Видеокарта, если она доступна, иначе процессор.", rec=True) }}
+  {{ card("hw_accel", "vaapi", s.hw_accel, "Только видеокарта", "Intel/AMD через VAAPI. Если она недоступна — задача завершится ошибкой.") }}
+  {{ card("hw_accel", "software", s.hw_accel, "Только процессор", "Работает везде, но медленно: фильм 4K может кодироваться много часов.") }}
+</div>
+<label>Устройство видеокарты <input name="hw_device" value="{{ s.hw_device }}"></label>
+<div class="test-row"><button type="button" class="secondary" data-test="hw">Проверить видеокарту</button><span class="test-result"></span></div>
+<p class="hint"><b>HDR</b> (яркий расширенный цвет) при перекодировании переводится в обычный цвет (tone mapping), иначе картинка
+получится блёклой и серой. Это делается на процессоре, потому что у многих видеокарт этот режим даёт слишком тёмную картинку,
+поэтому фильмы в HDR кодируются медленнее — примерно в 2 раза медленнее реального времени на двухъядерном процессоре.</p>
+
+{% elif step == "audio" %}
+<h1>Звук и языки</h1>
+<p class="lead">Фильмы для кинотеатра сведены с огромным разбросом громкости: взрывы оглушают, а диалоги еле слышно.
+jellyprep может добавить отдельную дорожку <b>«{{ VOICE_TITLE }}»</b>: голоса громче, громкие моменты тише,
+общая громкость выровнена. Она ставится дорожкой по умолчанию, а оригинальные дорожки остаются — в плеере всегда можно переключиться обратно.</p>
+<div class="cards">
+  {{ card("voice_track", 1, 1 if s.voice_track else 0, "Добавлять дорожку «" ~ VOICE_TITLE ~ "»",
+     "Стерео-дорожка AAC (около 170 МБ на двухчасовой фильм). Удобно смотреть вечером и на динамиках телевизора.", rec=True) }}
+  {{ card("voice_track", 0, 1 if s.voice_track else 0, "Не добавлять", "Звук остаётся как в оригинале.") }}
+</div>
+<h2>Сила обработки</h2>
+<div class="cards">
+  {{ card("voice_strength", "light", s.voice_strength, "Лёгкая", "Чуть громче голоса, динамика почти как в оригинале.") }}
+  {{ card("voice_strength", "medium", s.voice_strength, "Средняя", "Голоса заметно громче, взрывы не пугают. Подходит для большинства фильмов.", rec=True) }}
+  {{ card("voice_strength", "strong", s.voice_strength, "Сильная (ночной режим)", "Всё примерно одной громкости. Для просмотра, когда спят соседи или дети.") }}
+</div>
+
+<h2>Какие языки оставлять</h2>
+<p class="hint">В раздачах часто по 5–8 звуковых дорожек и десяток субтитров. Ненужные можно убрать — меньше путаницы в плеере.
+Коды языков — трёхбуквенные (ISO 639-2): <code>rus</code>, <code>eng</code>, <code>ukr</code>, <code>ger</code>, <code>fre</code>, <code>spa</code>, <code>jpn</code>…
+Если в файле нет ни одной дорожки нужного языка, остаются все.</p>
+<label>Оставлять звук и субтитры на языках
+  <input name="keep_langs_text" value="{{ s.keep_langs|join(', ') }}" placeholder="rus, eng"></label>
+<div class="cards">
+  {{ card("keep_unknown_lang", 1, 1 if s.keep_unknown_lang else 0, "Дорожки без языка оставлять", "Часто язык просто не указан, а дорожка нужная.", rec=True) }}
+  {{ card("keep_unknown_lang", 0, 1 if s.keep_unknown_lang else 0, "Убирать дорожки без языка", "Только если уверены, что у вас язык всегда указан.") }}
+</div>
+<h2>Несколько переводов на одном языке</h2>
+<p class="hint">В русских раздачах часто 5–10 дорожек с разными переводами (дубляж, многоголосый, авторские). Каждая — 0.5–1.5 ГБ на фильм.
+Можно оставлять только первые по порядку: обычно это основной дубляж. Дорожка «по умолчанию» остаётся всегда.</p>
+{% set mt = s.max_tracks_per_lang|int %}
+<div class="cards">
+  {{ card("max_tracks_per_lang", 0, mt, "Оставлять все", "Ничего не теряется, но файлы больше.", rec=True) }}
+  {{ card("max_tracks_per_lang", 2, mt, "Не больше 2 на язык", "Основной перевод и запасной. Экономит гигабайты на фильм.") }}
+  {{ card("max_tracks_per_lang", 1, mt, "Только одну на язык", "Максимум экономии.") }}
+</div>
+<label>Из какой дорожки делать «{{ VOICE_TITLE }}» — языки по приоритету
+  <input name="voice_langs_text" value="{{ s.voice_langs|join(', ') }}" placeholder="rus, eng">
+  <small>Берётся первая дорожка первого найденного языка (если таких несколько — та, что помечена «по умолчанию»).</small></label>
+
+{% elif step == "cleanup" %}
+<h1>Когда удалять оригинал из qBittorrent</h1>
+<p class="lead">После того как файл разложен в библиотеку, оригинал можно удалить, чтобы освободить место.
+Но честно раздать скачанное — хорошая практика, поэтому удаление ждёт, пока выполнится условие раздачи.
+Удаление происходит только после того, как jellyprep проверил, что файлы в библиотеке на месте.</p>
+<p class="hint"><b>Рейтинг</b> — сколько раз вы раздали объём торрента: 2.0 значит «отдал вдвое больше, чем скачал».
+Если раздачу никто не качает, рейтинг может не набраться никогда, поэтому есть второе условие — срок.
+Удаление наступает при выполнении <b>любого</b> из условий.</p>
+<p class="hint">Важно: если файл попал в библиотеку хардлинком (без изменений), удаление торрента место не освободит —
+файл остаётся в библиотеке. Место освобождается, когда файл был перекодирован или перепакован.</p>
+<div class="cards">
+  {{ card("preset", "r2d30", preset.name, "Раздать 2× или 30 дней", "Удалить, когда рейтинг дойдёт до 2.0 или пройдёт 30 дней раздачи.", rec=True) }}
+  {{ card("preset", "r1d14", preset.name, "Раздать 1× или 14 дней", "Быстрее освобождает место.") }}
+  {{ card("preset", "never", preset.name, "Никогда не удалять", "Оригиналы остаются в qBittorrent, удаляете сами.") }}
+  {{ card("preset", "custom", preset.name, "Своё условие", "Укажите рейтинг и/или срок ниже (пустое поле — условие не используется).") }}
+</div>
+<div class="grid2">
+  <label>Рейтинг <input name="ratio" value="{{ preset.ratio if preset.ratio is not none else '' }}" inputmode="decimal"></label>
+  <label>Дней раздачи <input name="days" value="{{ preset.days if preset.days is not none else '' }}" inputmode="decimal"></label>
+</div>
+<p class="hint">Это значение для всех категорий. Отдельно для каждой категории его можно поменять потом на странице «Категории».</p>
+
+{% elif step == "limits" %}
+<h1>Ограничения</h1>
+<h2>Минимум свободного места</h2>
+<p class="hint">Если после обработки на диске останется меньше, задача подождёт, пока место не освободится.
+Хардлинки места не занимают, это касается копирования и перепаковки.</p>
+{% set mf = s.min_free_gb|int %}
+<div class="cards">
+  {{ card("min_free_choice", 20, mf, "20 ГБ", "Для небольших дисков.") }}
+  {{ card("min_free_choice", 50, mf, "50 ГБ", "Хватит на пару фильмов в высоком качестве.", rec=True) }}
+  {{ card("min_free_choice", 100, mf, "100 ГБ", "С запасом для больших сериалов.") }}
+  {{ card("min_free_choice", "custom", "custom" if mf not in [20, 50, 100] else "", "Своё значение", "Укажите ниже.") }}
+</div>
+<label>Своё значение, ГБ <input name="min_free_gb" value="{{ s.min_free_gb }}" inputmode="decimal"></label>
+
+<h2>Когда считать распознавание уверенным</h2>
+<p class="hint">Для категорий с режимом «Если уверен». jellyprep сравнивает имя файла с найденным в TMDB и год выпуска.</p>
+<div class="cards">
+  {{ card("confidence", 0.7, s.confidence, "Смелее (70%)", "Меньше ручной работы, изредка возможны ошибки.") }}
+  {{ card("confidence", 0.8, s.confidence, "Обычно (80%)", "Хороший баланс.", rec=True) }}
+  {{ card("confidence", 0.9, s.confidence, "Осторожно (90%)", "Почти всё неочевидное — на проверку.") }}
+</div>
+
+<h2>Когда перекодировать</h2>
+<p class="hint">Перекодирование нагружает сервер на часы. Его можно откладывать на ночь. Раскладка хардлинками
+и обработка звука выполняются сразу. Для отдельного фильма на его странице есть кнопка «Выполнить сейчас».</p>
+<div class="cards">
+  {{ card("night_only", 1, 1 if s.night_only else 0, "Только ночью", "В заданное окно времени (часовой пояс контейнера).", rec=True) }}
+  {{ card("night_only", 0, 1 if s.night_only else 0, "В любое время", "Сразу, как только задача одобрена.") }}
+</div>
+<div class="grid2">
+  <label>Начало окна <input type="time" name="night_start" value="{{ s.night_start }}"></label>
+  <label>Конец окна <input type="time" name="night_end" value="{{ s.night_end }}"></label>
+</div>
+
+<h2>Как часто проверять qBittorrent</h2>
+<div class="cards">
+  {{ card("poll_minutes", 1, s.poll_minutes, "Раз в минуту", "Быстрее появляются новинки.") }}
+  {{ card("poll_minutes", 5, s.poll_minutes, "Раз в 5 минут", "Почти без нагрузки.", rec=True) }}
+  {{ card("poll_minutes", 15, s.poll_minutes, "Раз в 15 минут", "Минимум запросов.") }}
+</div>
+
+{% elif step == "jellyfin" %}
+<h1>Jellyfin <span class="pill">необязательно</span></h1>
+<p class="lead">Если указать Jellyfin, jellyprep создаст в нём библиотеки для выбранных категорий,
+а после каждой раскладки попросит пересканировать библиотеку — новинки появятся сразу.</p>
+<details class="explain"><summary>Где взять API-ключ</summary>
+<p>Jellyfin → Панель управления → API-ключи → «+» → любое имя, например <code>jellyprep</code>.</p>
+</details>
+<div class="grid2">
+  <label>Адрес <input name="jellyfin_url" value="{{ s.jellyfin_url }}" placeholder="http://jellyfin:8096"></label>
+  <label>API-ключ {{ secret("jellyfin_key", s.jellyfin_key) }}</label>
+</div>
+{{ test("jellyfin") }}
+<label>Соответствие путей jellyprep → Jellyfin
+  <textarea name="jf_path_map_text" rows="2" placeholder="/media -> /data/media">{{ jf_path_map_text }}</textarea>
+  <small>Нужно, только если Jellyfin видит ту же папку под другим путём. Если у обоих <code>/media</code>, оставьте пустым.</small>
+</label>
+<p><button type="submit" name="action" value="stay" class="secondary">Сохранить и показать библиотеки</button></p>
+
+<h2 id="libraries">Библиотеки в Jellyfin</h2>
+<p class="hint">Каждой категории нужна библиотека в Jellyfin, смотрящая на её папку. jellyprep может создать её сам —
+с правильным типом, чтобы Jellyfin искал постеры и описания как для фильмов или как для сериалов.
+Можно и добавить папку в уже существующую библиотеку.</p>
+{% if jf_results %}
+<div class="banner">{% for r in jf_results %}<div class="{{ 'ok' if r.ok else 'bad' }}">{{ '✓' if r.ok else '✗' }} {{ r.message }}</div>{% endfor %}</div>
+{% endif %}
+{% if not s.jellyfin_url or not s.jellyfin_key %}
+<p class="muted">Укажите адрес и ключ и нажмите «Сохранить и показать библиотеки».</p>
+{% elif jf_error %}
+<p class="bad">{{ jf_error }}</p>
+{% elif not jf_rows %}
+<p class="muted">Нет включённых категорий — их выбирают на шаге «Категории».</p>
+{% else %}
+<div class="table-wrap"><table>
+  <tr><th>Категория</th><th>Папка (как видит Jellyfin)</th><th>Что сделать</th><th>Название и тип новой библиотеки</th></tr>
+  {% for r in jf_rows %}
+  <tr>
+    <td><b>{{ r.cat }}</b><input type="hidden" name="jf_cat" value="{{ r.cat }}"></td>
+    <td><code>{{ r.jf_path }}</code></td>
+    <td>
+      {% if r.linked %}<span class="ok">✓ уже в библиотеке «{{ r.linked|join("», «") }}»</span>
+        <input type="hidden" name="jf_action::{{ r.cat }}" value="skip">
+      {% else %}
+      <select name="jf_action::{{ r.cat }}">
+        <option value="create" selected>Создать новую библиотеку (рекомендуется)</option>
+        {% for l in jf_libs %}<option value="add:{{ l.name }}">Добавить в «{{ l.name }}» ({{ JF_TYPE_LABELS.get(l.type, l.type) }})</option>{% endfor %}
+        <option value="skip">Ничего не делать</option>
+      </select>
+      {% endif %}
+    </td>
+    <td>{% if not r.linked %}
+      <input name="jf_name::{{ r.cat }}" value="{{ r.name }}" size="18">
+      <select name="jf_type::{{ r.cat }}">
+        {% for v, l in JF_TYPE_LABELS.items() %}<option value="{{ v }}"{% if r.type == v %} selected{% endif %}>{{ l }}</option>{% endfor %}
+      </select>
+      {% if not r.type %}<br><small class="warn">Тип категории «Авто»: лучше выбрать Фильмы или Сериалы, смешанные библиотеки Jellyfin распознаёт хуже.</small>{% endif %}
+    {% endif %}</td>
+  </tr>
+  {% endfor %}
+</table></div>
+<p><button type="submit" formaction="/setup/jellyfin/libraries">Применить в Jellyfin</button></p>
+{% if jf_libs %}
+<details><summary>Библиотеки, которые уже есть в Jellyfin ({{ jf_libs|length }})</summary>
+<ul>{% for l in jf_libs %}<li><b>{{ l.name }}</b> ({{ JF_TYPE_LABELS.get(l.type, l.type) }}): {% for p in l.paths %}<code>{{ p }}</code> {% endfor %}</li>{% endfor %}</ul>
+<p class="hint">Старые библиотеки можно оставить: когда jellyprep удалит оригинал торрента, файл пропадёт из старой библиотеки и останется в новой.</p>
+</details>
+{% endif %}
+{% endif %}
+
+{% elif step == "finish" %}
+<h1>Почти готово</h1>
+<table class="summary">
+  <tr><th>qBittorrent</th><td>{{ s.qbit_url }}</td></tr>
+  <tr><th>Библиотека</th><td><code>{{ s.library_root }}</code></td></tr>
+  <tr><th>Категории</th><td>{% for c in cats %}{{ c.name }} → <code>{{ c.library_dir }}</code>{% if not loop.last %}, {% endif %}{% else %}<span class="bad">ни одной не выбрано</span>{% endfor %}</td></tr>
+  <tr><th>TMDB</th><td>{{ "ключ задан" if s.tmdb_key else "без ключа — всё на ручную проверку" }}</td></tr>
+  <tr><th>Модель</th><td>{{ {"none": "не используется", "ollama": "Ollama", "openai": "OpenAI-совместимая"}[s.llm_kind] }}</td></tr>
+  <tr><th>Мин. свободно</th><td>{{ s.min_free_gb }} ГБ</td></tr>
+  <tr><th>Видео</th><td>{{ {"compat": "максимальная совместимость", "balanced": "только 4K и HDR", "off": "не перекодировать"}[s.video_mode] }}{% if s.video_mode != "off" %}, {{ {"small": "экономно", "standard": "обычное качество", "high": "высокое качество"}[s.video_quality] }}{% if s.night_only %}, ночью {{ s.night_start }}–{{ s.night_end }}{% endif %}{% endif %}</td></tr>
+  <tr><th>Звук</th><td>{{ ("«" ~ VOICE_TITLE ~ "», " ~ {"light": "лёгкая", "medium": "средняя", "strong": "сильная"}[s.voice_strength] ~ " обработка") if s.voice_track else "без изменений" }}; языки: {{ s.keep_langs|join(", ") or "все" }}</td></tr>
+  <tr><th>Jellyfin</th><td>{{ s.jellyfin_url or "не указан" }}</td></tr>
+</table>
+<h2>Как начать</h2>
+<div class="cards">
+  {{ card("dry_run", 1, 1 if s.dry_run else 0, "Сначала посмотреть (dry-run)",
+     "jellyprep распознает торренты и покажет, что и куда положил бы и что удалил бы, но ничего не изменит на диске и в qBittorrent. Выключается в настройках.", rec=True) }}
+  {{ card("dry_run", 0, 1 if s.dry_run else 0, "Сразу работать",
+     "Файлы сразу раскладываются в библиотеку, оригиналы удаляются по условиям раздачи.") }}
+</div>
+{% endif %}
+
+<div class="nav-row">
+  {% if prev %}<a class="button secondary" href="/setup/{{ prev }}">← Назад</a>{% else %}<span></span>{% endif %}
+  <button type="submit">{{ "Начать" if step == "finish" else ("Пропустить / далее →" if step in ["llm", "jellyfin"] else "Далее →") }}</button>
+</div>
+</form>
+{% endblock %}

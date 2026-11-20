@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Журнал</h1>
+<ul class="log">
+  {% for l in logs %}
+  <li class="lv-{{ l.level }}"><small>{{ l.ts|ts }}</small>
+    {% if l.item_id %}<a href="/items/{{ l.item_id }}">#{{ l.item_id }}</a>{% endif %} {{ l.message }}</li>
+  {% else %}<li class="muted">пусто</li>{% endfor %}
+</ul>
+{% endblock %}

@@ -1,0 +1,21 @@
+{% macro card(name, value, current, title, desc, rec=False) -%}
+<label class="card{% if rec %} rec{% endif %}">
+  <input type="radio" name="{{ name }}" value="{{ value }}"{% if current|string == value|string %} checked{% endif %}>
+  <div>
+    <b>{{ title }}</b>{% if rec %} <span class="pill ok">Рекомендуется</span>{% endif %}
+    <p>{{ desc|safe }}</p>
+  </div>
+</label>
+{%- endmacro %}
+
+{% macro test(service) -%}
+<div class="test-row"><button type="button" class="secondary" data-test="{{ service }}">Проверить</button><span class="test-result"></span></div>
+{%- endmacro %}
+
+{% macro secret(name, is_set, placeholder="") -%}
+<input type="password" name="{{ name }}" autocomplete="off" placeholder="{{ '•••••• сохранено (оставьте пустым, чтобы не менять)' if is_set else placeholder }}">
+{%- endmacro %}
+
+{% macro state(st) -%}
+<span class="pill st-{{ st }}">{{ STATE_LABELS.get(st, st) }}</span>
+{%- endmacro %}

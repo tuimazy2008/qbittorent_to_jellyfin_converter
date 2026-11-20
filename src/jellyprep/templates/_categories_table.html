@@ -1,0 +1,27 @@
+<div class="table-wrap">
+<table class="cats">
+  <tr><th>Обрабатывать</th><th>Категория</th><th>Тип</th><th>Папка в библиотеке</th><th>Подтверждение</th>
+    {% if full %}<th>Удалять</th><th>Рейтинг</th><th>Дней</th>{% endif %}</tr>
+  {% for c in cats %}
+  <tr>
+    <td><input type="hidden" name="cat" value="{{ c.name }}">
+        <input type="checkbox" name="enabled::{{ c.name }}" value="1"{% if c.enabled %} checked{% endif %}></td>
+    <td><b>{{ c.name }}</b>{% if c.hint %}<br><small class="muted">{{ c.hint }}</small>{% endif %}</td>
+    <td><select name="kind::{{ c.name }}">
+      {% for v, l in [("auto","Авто"),("movies","Фильмы"),("tv","Сериалы")] %}<option value="{{ v }}"{% if c.kind == v %} selected{% endif %}>{{ l }}</option>{% endfor %}
+    </select></td>
+    <td><input name="dir::{{ c.name }}" value="{{ c.library_dir }}" size="16"></td>
+    <td><select name="approval::{{ c.name }}">
+      {% for v, l in [("auto_if_confident","Если уверен"),("auto","Автоматически"),("always_confirm","Всегда спрашивать")] %}<option value="{{ v }}"{% if c.approval == v %} selected{% endif %}>{{ l }}</option>{% endfor %}
+    </select></td>
+    {% if full %}
+    <td><input type="checkbox" name="delete::{{ c.name }}" value="1"{% if c.delete_enabled %} checked{% endif %}></td>
+    <td><input name="ratio::{{ c.name }}" value="{{ c.seed_ratio if c.seed_ratio is not none else '' }}" size="4" inputmode="decimal"></td>
+    <td><input name="days::{{ c.name }}" value="{{ c.seed_days if c.seed_days is not none else '' }}" size="4" inputmode="decimal"></td>
+    {% endif %}
+  </tr>
+  {% else %}
+  <tr><td colspan="8" class="muted">Категорий нет. Создайте их в qBittorrent и обновите страницу.</td></tr>
+  {% endfor %}
+</table>
+</div>

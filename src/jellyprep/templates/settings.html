@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% from "_macros.html" import card, test, secret %}
+{% block content %}
+<h1>Настройки</h1>
+<form method="post" class="wizard">
+  <h2>Режим работы</h2>
+  <div class="cards">
+    {{ card("dry_run", 1, 1 if s.dry_run else 0, "Dry-run", "Только показывать, что было бы сделано.") }}
+    {{ card("dry_run", 0, 1 if s.dry_run else 0, "Рабочий режим", "Раскладывать файлы и удалять оригиналы по условиям раздачи.") }}
+  </div>
+
+  <h2>qBittorrent</h2>
+  <label>Адрес <input name="qbit_url" value="{{ s.qbit_url }}"></label>
+  <div class="grid2">
+    <label>Логин <input name="qbit_user" value="{{ s.qbit_user }}" autocomplete="off"></label>
+    <label>Пароль {{ secret("qbit_pass", s.qbit_pass) }}</label>
+  </div>
+  {{ test("qbit") }}
+
+  <h2>Папки</h2>
+  <label>Корневая папка библиотеки <input name="library_root" value="{{ s.library_root }}"></label>
+  <label>Соответствие путей <textarea name="path_map_text" rows="3">{{ path_map_text }}</textarea>
+    <small><code>путь в qBittorrent -> путь в jellyprep</code>, по одному на строку</small></label>
+  <label>Перепаковывать в MKV форматы
+    <input name="remux_containers_text" value="{{ s.remux_containers|join(', ') }}" placeholder="например: avi, ts">
+    <small>Без перекодирования, просто другой контейнер. Создаёт копию файла, поэтому по умолчанию выключено.</small></label>
+  <label>Если хардлинк невозможен
+    <select name="link_fallback">
+      <option value="copy"{% if s.link_fallback == "copy" %} selected{% endif %}>копировать</option>
+      <option value="fail"{% if s.link_fallback == "fail" %} selected{% endif %}>ошибка</option>
+    </select></label>
+
+  <h2>TMDB</h2>
+  <div class="grid2">
+    <label>Ключ {{ secret("tmdb_key", s.tmdb_key) }}</label>
+    <label>Язык <input name="tmdb_language" value="{{ s.tmdb_language }}"></label>
+  </div>
+  {{ test("tmdb") }}
+
+  <h2>Локальная модель <span class="pill">необязательно</span></h2>
+  <label>Тип
+    <select name="llm_kind">
+      {% for v, l in [("none","не использовать"),("ollama","Ollama"),("openai","OpenAI-совместимый")] %}<option value="{{ v }}"{% if s.llm_kind == v %} selected{% endif %}>{{ l }}</option>{% endfor %}
+    </select></label>
+  <div class="grid2">
+    <label>Адрес <input name="llm_url" value="{{ s.llm_url }}"></label>
+    <label>Модель <input name="llm_model" value="{{ s.llm_model }}" list="llm-models"></label>
+  </div>
+  <datalist id="llm-models"></datalist>
+  <label>Ключ API {{ secret("llm_key", s.llm_key) }}</label>
+  {{ test("llm") }}
+
+  <h2>Jellyfin <span class="pill">необязательно</span></h2>
+  <div class="grid2">
+    <label>Адрес <input name="jellyfin_url" value="{{ s.jellyfin_url }}"></label>
+    <label>API-ключ {{ secret("jellyfin_key", s.jellyfin_key) }}</label>
+  </div>
+  {{ test("jellyfin") }}
+  <label>Соответствие путей jellyprep → Jellyfin <textarea name="jf_path_map_text" rows="2">{{ jf_path_map_text }}</textarea></label>
+  <p><a href="/setup/jellyfin#libraries">Библиотеки Jellyfin для категорий →</a></p>
+
+  <h2>Видео</h2>
+  <div class="grid2">
+    <label>Перекодирование
+      <select name="video_mode">
+        {% for v, l in [("compat","максимальная совместимость"),("balanced","только 4K и HDR"),("off","не перекодировать")] %}<option value="{{ v }}"{% if s.video_mode == v %} selected{% endif %}>{{ l }}</option>{% endfor %}
+      </select></label>
+    <label>Качество
+      <select name="video_quality">
+        {% for v, l in [("small","экономно ≈4 Мбит/с"),("standard","обычно ≈6 Мбит/с"),("high","высокое ≈9 Мбит/с")] %}<option value="{{ v }}"{% if s.video_quality == v %} selected{% endif %}>{{ l }}</option>{% endfor %}
+      </select></label>
+    <label>Порог битрейта, Мбит/с <input name="video_max_mbps" value="{{ s.video_max_mbps }}" inputmode="decimal"></label>
+    <label>Чем кодировать
+      <select name="hw_accel">
+        {% for v, l in [("auto","автоматически"),("vaapi","видеокарта (VAAPI)"),("software","процессор")] %}<option value="{{ v }}"{% if s.hw_accel == v %} selected{% endif %}>{{ l }}</option>{% endfor %}
+      </select></label>
+    <label>Устройство видеокарты <input name="hw_device" value="{{ s.hw_device }}"></label>
+  </div>
+  <div class="test-row"><button type="button" class="secondary" data-test="hw">Проверить видеокарту</button><span class="test-result"></span></div>
+  <div class="grid2">
+    <label>Перекодировать только ночью
+      <select name="night_only"><option value="1"{% if s.night_only %} selected{% endif %}>да</option><option value="0"{% if not s.night_only %} selected{% endif %}>нет, сразу</option></select></label>
+    <label>Окно с <input type="time" name="night_start" value="{{ s.night_start }}"></label>
+    <label>до <input type="time" name="night_end" value="{{ s.night_end }}"></label>
+  </div>
+
+  <h2>Звук и языки</h2>
+  <div class="grid2">
+    <label>Дорожка «{{ VOICE_TITLE }}»
+      <select name="voice_track"><option value="1"{% if s.voice_track %} selected{% endif %}>добавлять</option><option value="0"{% if not s.voice_track %} selected{% endif %}>нет</option></select></label>
+    <label>Сила обработки
+      <select name="voice_strength">
+        {% for v, l in [("light","лёгкая"),("medium","средняя"),("strong","сильная (ночной режим)")] %}<option value="{{ v }}"{% if s.voice_strength == v %} selected{% endif %}>{{ l }}</option>{% endfor %}
+      </select></label>
+    <label>Оставлять языки <input name="keep_langs_text" value="{{ s.keep_langs|join(', ') }}"></label>
+    <label>Язык для «{{ VOICE_TITLE }}», по приоритету <input name="voice_langs_text" value="{{ s.voice_langs|join(', ') }}"></label>
+    <label>Звуковых дорожек на язык (0 — все) <input name="max_tracks_per_lang" value="{{ s.max_tracks_per_lang }}" inputmode="numeric"></label>
+    <label>Дорожки без языка
+      <select name="keep_unknown_lang"><option value="1"{% if s.keep_unknown_lang %} selected{% endif %}>оставлять</option><option value="0"{% if not s.keep_unknown_lang %} selected{% endif %}>убирать</option></select></label>
+  </div>
+
+  <h2>Ограничения</h2>
+  <div class="grid2">
+    <label>Минимум свободного места, ГБ <input name="min_free_gb" value="{{ s.min_free_gb }}" inputmode="decimal"></label>
+    <label>Порог уверенности (0–1) <input name="confidence" value="{{ s.confidence }}" inputmode="decimal"></label>
+    <label>Проверять qBittorrent раз в, мин <input name="poll_minutes" value="{{ s.poll_minutes }}" inputmode="numeric"></label>
+  </div>
+  <div class="nav-row"><span></span><button>Сохранить</button></div>
+</form>
+<form method="post" action="/settings/rerun-wizard"><button class="secondary">Пройти мастер настройки заново</button></form>
+{% endblock %}
