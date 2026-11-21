@@ -26,6 +26,7 @@ DEFAULTS: dict[str, Any] = {
     "llm_url": "",
     "llm_model": "",
     "llm_key": "",
+    "llm_auto": True,            # ask the model by itself when the rules can't identify something
     # Optional Jellyfin
     "jellyfin_url": "",
     "jellyfin_key": "",

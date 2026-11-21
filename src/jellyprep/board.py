@@ -7,7 +7,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from . import pipeline, worker as w
+from . import llm, pipeline, worker as w
 from .db import APPROVED, DONE, ERROR, NEW, REMOVED, REVIEW, RUNNING, SKIPPED
 
 STAGES = ["Загрузка", "Распознавание", "Обработка", "Библиотека", "Раздача"]
@@ -76,7 +76,11 @@ def item_row(item: dict, s: dict, cat: dict | None, logs: list[dict], queue_ahea
         icon, group = "❓", "decision"
         problems = (item.get("ident") or {}).get("problems", []) + (item.get("plan") or {}).get("problems", [])
         line = "нужно решение: " + (problems[0] if problems else (item.get("trace") or {}).get("decision") or "проверьте распознавание")
+        if (item.get("note") or "").startswith(("модель", "предложение модели")):
+            icon, line = "🤖", item["note"]
         actions.append({"label": "Открыть", "open": True})
+        if llm.configured(s) and item.get("note") != "модель думает…":
+            actions.append({"label": "Спросить модель", "post": f"/items/{item['id']}/ask-llm"})
         if (item.get("plan") or {}).get("actions"):
             actions.append({"label": "Подтвердить", "post": f"/items/{item['id']}/approve"})
     elif state == ERROR:

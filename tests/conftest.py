@@ -40,6 +40,13 @@ class FakeTMDB:
     def season_sizes(self, tmdb_id):
         return self.seasons.get(tmdb_id, {})
 
+    episodes = {(12345, 1): ["Мягкая лапа смерти. Часть 1", "Мягкая лапа смерти. Часть 2",
+                             "Гроб на две персоны. Часть 1", "Гроб на две персоны. Часть 2"],
+                (12345, 2): ["Заказчик. Часть 1", "Заказчик. Часть 2", "Падение", "Марионетки"]}
+
+    def season_episodes(self, tmdb_id, season):
+        return [{"episode": i + 1, "name": n} for i, n in enumerate(self.episodes.get((tmdb_id, season), []))]
+
 
 class FakeQBit:
     def __init__(self):

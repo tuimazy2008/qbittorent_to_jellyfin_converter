@@ -4,6 +4,7 @@
 {% set plan = item.plan or {} %}
 <p>{{ state(item.state) }} · категория <b>{{ item.category }}</b> · <code>{{ item.content_path }}</code></p>
 {% if item.error %}<p class="banner bad">{{ item.error }}</p>{% endif %}
+{% if item.note %}<p class="banner {{ 'warn' if item.note.startswith('модель:') else '' }}">{{ '🤖 ' if 'модель' in item.note else '' }}{{ item.note }}</p>{% endif %}
 
 <h3>Путь задачи</h3>
 {{ pipe_full(pipe) }}
@@ -17,6 +18,9 @@
   {% endif %}
   {% if item.state not in ["done", "removed"] %}
   <form method="post" action="/items/{{ item.id }}/reanalyze"><button class="secondary">Распознать заново</button></form>
+  {% if s.llm_kind != "none" and s.llm_model and item.note != "модель думает…" %}
+  <form method="post" action="/items/{{ item.id }}/ask-llm"><button class="secondary" title="Отправить локальной модели имена файлов и названия серий из TMDB. Её ответ подставится сюда и будет ждать вашего подтверждения.">🤖 Спросить модель</button></form>
+  {% endif %}
   <form method="post" action="/items/{{ item.id }}/skip"><button class="secondary">Пропустить</button></form>
   {% endif %}
 </div>

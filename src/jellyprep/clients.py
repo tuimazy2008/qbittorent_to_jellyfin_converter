@@ -157,6 +157,11 @@ class TMDB:
         return Candidate(d["id"], d.get("name", ""), d.get("original_name", ""),
                          _year(d.get("first_air_date")), d.get("popularity", 0.0), d.get("overview", ""))
 
+    def season_episodes(self, tmdb_id: int, season: int) -> list[dict]:
+        """[{"episode": 1, "name": "Мягкая лапа смерти. Часть 1"}, ...]"""
+        d = self._get(f"/tv/{tmdb_id}/season/{season}", language=self.language)
+        return [{"episode": e["episode_number"], "name": e.get("name") or ""} for e in d.get("episodes", [])]
+
     def season_sizes(self, tmdb_id: int) -> dict[int, int]:
         d = self.details("tv", tmdb_id)
         return {s["season_number"]: s.get("episode_count", 0) for s in d.get("seasons", [])}

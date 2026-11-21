@@ -15,13 +15,14 @@ import time
 import traceback
 from pathlib import Path
 
-from . import config, executor, identify, media, planner, transcode
+from . import config, executor, identify, llm, media, planner, transcode
 from .clients import QBit, TMDB, ClientError, Jellyfin, is_complete
 from .db import APPROVED, DB, DONE, ERROR, NEW, REMOVED, REVIEW, RUNNING, SKIPPED
 
 log = logging.getLogger("jellyprep")
 
 KIND_HINT = {"movies": "movie", "tv": "tv", "auto": "auto"}
+INFO_PROBLEMS = ("Серии сопоставлены по названиям", "Сквозная нумерация")
 
 
 def map_path(path: str, path_map: list[dict]) -> str:
@@ -106,6 +107,8 @@ class Worker:
         self.status: dict = {"last_run": None, "last_error": None, "running": False, "job": None,
                              "job_started": None}
         self._downloads: tuple[float, list[dict]] = (0.0, [])
+        self._llm_busy: set[int] = set()
+        self._llm_lock = threading.Lock()
 
     # --- threads ----------------------------------------------------------
     def start(self) -> None:
@@ -156,6 +159,10 @@ class Worker:
             self.sync(s, torrents)
             for item in self.db.items(NEW):
                 self.analyze(item["id"])
+            if llm.configured(s):
+                for item in self.db.items(REVIEW):  # model was offline last time: try again
+                    if (item.get("trace") or {}).get("llm_pending"):
+                        self.ask_llm(item["id"], auto=True)
             changed = False
             if not s["dry_run"]:
                 for item in self.db.items(APPROVED):
@@ -269,6 +276,12 @@ class Worker:
                       approved_at=time.time() if state == APPROVED else None)
         self.db.log(f"Распознано ({why}): {_summary(ident)}; {_plan_summary(plan)} → "
                     f"{'одобрено' if state == APPROVED else 'на проверку'}", item_id=item_id)
+        tr = self.db.item(item_id).get("trace") or {}
+        # rules already found an answer and only want a confirmation: don't let the model overwrite it
+        hard = [p for p in problems if not p.startswith(INFO_PROBLEMS)] or conf < s["confidence"]
+        if (state == REVIEW and not manual and hard and s.get("llm_auto")
+                and llm.configured(s) and not tr.get("llm_tried")):
+            self.ask_llm(item_id, auto=True)
 
     def approve(self, item_id: int, run_now: bool = False) -> None:
         item = self.db.item(item_id)
@@ -283,6 +296,53 @@ class Worker:
         elif run_now:
             self.db.log("Выполнить не дожидаясь ночи", item_id=item_id)
         self.trigger()
+
+    def ask_llm(self, item_id: int, auto: bool = False, wait: bool = False) -> None:
+        """Ask the local model to identify the item (in the background). Its answer waits for confirmation."""
+        with self._llm_lock:
+            if item_id in self._llm_busy:
+                return
+            self._llm_busy.add(item_id)
+        self.db.execute("UPDATE items SET note=? WHERE id=?", ("модель думает…", item_id))
+        t = threading.Thread(target=self._ask_llm, args=(item_id, auto), daemon=True, name=f"llm-{item_id}")
+        t.start()
+        if wait:
+            t.join()
+
+    def _ask_llm(self, item_id: int, auto: bool) -> None:
+        try:
+            s = config.load(self.db)
+            item = self.db.item(item_id)
+            if not llm.configured(s):
+                raise llm.LLMError("модель не настроена (Настройки → Локальная модель)")
+            ident = item.get("ident") or {}
+            sc = media.scan(item["content_path"])
+            if ident.get("kind") == "movie":
+                cands = (ident.get("movies") or [{}])[0].get("candidates") or []
+            else:
+                cands = (ident.get("show") or {}).get("candidates") or []
+            tmdb = tmdb_client(s)
+            seasons = {e["season"] for e in ident.get("episodes") or []}
+            titles = llm.episode_titles_for(tmdb, cands, seasons) if ident.get("kind") != "movie" else {}
+            prompt = llm.build_prompt(item["name"], sc.videos, ident.get("kind", ""), cands, titles)
+            started = time.time()
+            answer = llm.ask(s, prompt)
+            overrides, comment = llm.to_overrides(answer, sc.videos, {c["id"] for c in cands})
+        except (llm.LLMError, OSError) as e:
+            offline = "недоступна" in str(e)
+            self.db.execute("UPDATE items SET note=? WHERE id=?", (f"модель: {e}", item_id))
+            self.db.trace(item_id, llm_tried=True, llm_pending=bool(auto and offline))
+            self.db.log(f"Модель: {e}", "warning", item_id)
+            return
+        finally:
+            with self._llm_lock:
+                self._llm_busy.discard(item_id)
+        self.db.trace(item_id, llm_tried=True, llm_pending=False, llm_comment=comment,
+                      llm_seconds=round(time.time() - started))
+        self.analyze(item_id, overrides)
+        self.db.execute("UPDATE items SET note=? WHERE id=?",
+                        (f"предложение модели — проверьте и подтвердите: {comment}", item_id))
+        self.db.log(f"Модель предложила ({round(time.time() - started)} с): {comment}", item_id=item_id)
 
     def skip(self, item_id: int) -> None:
         self.db.update_item(item_id, state=SKIPPED)

@@ -98,7 +98,8 @@ def build(ident: dict, s: Scan, dest_root: Path, settings: dict, probe: ProbeFn 
         target = str(folder)
         show = sanitize(chosen.get("title") or "Unknown")
         for e in ident.get("episodes", []):
-            add_video(e["file"], folder / f"Season {e['season']:02d}" / f"{show} S{e['season']:02d}E{e['episode']:02d}")
+            name = f"{show} S{e['season']:02d}E{e['episode']:02d}" + (f"-E{e['episode_end']:02d}" if e.get("episode_end") else "")
+            add_video(e["file"], folder / f"Season {e['season']:02d}" / name)
         for rel in ident.get("unmatched", []):
             problems.append(f"Файл без номера серии пропущен: {rel}")
 

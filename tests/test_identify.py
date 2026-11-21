@@ -1,4 +1,4 @@
-from jellyprep import identify, media
+from jellyprep import identify, media, planner
 from conftest import make_file
 
 
@@ -121,3 +121,24 @@ def test_no_year_and_several_candidates_needs_confirmation(tmp_path, tmdb):
         make_file(root / "Season 1" / f"Radar.S01E{i:02d}.mkv")
     ident = identify.identify(media.scan(root), "tv", tmdb)
     assert ident["confidence"] <= 0.75
+
+
+def test_episodes_matched_by_tmdb_titles(tmp_path, tmdb):
+    root = tmp_path / "Тайны следствия"
+    for name in ("1. Мягкая лапа смерти (1 сер.).avi", "1. Мягкая лапа смерти (2 сер.).avi",
+                 "2. Гроб на две персоны (1 сер.).avi", "2. Гроб на две персоны (2 сер.).avi"):
+        make_file(root / "Тайны следствия" / name)
+    for name in ("1. Заказчик (1,2 сер.).avi", "2. Падение.avi", "3. Марионетки.avi"):
+        make_file(root / "Тайны следствия-2" / name)
+    s = media.scan(root)
+    ident = identify.identify(s, "tv", tmdb)
+    got = {e["file"].split("/")[-1]: (e["season"], e["episode"], e.get("episode_end")) for e in ident["episodes"]}
+    assert got["1. Мягкая лапа смерти (2 сер.).avi"] == (1, 2, None)
+    assert got["2. Гроб на две персоны (1 сер.).avi"] == (1, 3, None)
+    assert got["1. Заказчик (1,2 сер.).avi"] == (2, 1, 2)
+    assert got["3. Марионетки.avi"] == (2, 4, None)
+    assert not any("Повторяются" in p for p in ident["problems"])
+    assert any("по названиям" in p for p in ident["problems"])          # still shown for confirmation
+    plan = planner.build(ident, s, tmp_path / "lib", {})
+    names = sorted(a["dst"].split("/")[-1] for a in plan["actions"])
+    assert "Тайны следствия S02E01-E02.avi" in names and not plan["problems"]

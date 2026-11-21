@@ -135,6 +135,11 @@ def create_app(db: DB | None = None, start_worker: bool = True) -> FastAPI:
         worker.approve(item_id, run_now=True)
         return back_item(request, item_id)
 
+    @app.post("/items/{item_id}/ask-llm")
+    def item_ask_llm(request: Request, item_id: int):
+        worker.ask_llm(item_id)
+        return back_item(request, item_id)
+
     @app.post("/items/{item_id}/skip")
     def item_skip(request: Request, item_id: int):
         worker.skip(item_id)

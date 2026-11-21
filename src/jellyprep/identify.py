@@ -158,8 +158,11 @@ def identify_tv(s: Scan, tmdb: TMDB | None, overrides: dict) -> dict:
     manual_eps = overrides.get("episodes") or {}
     for v in s.videos:
         if v in manual_eps:
-            se, ep = manual_eps[v]
-            episodes.append({"file": v, "season": se, "episode": ep, "how": "вручную"})
+            se, ep, *rest = manual_eps[v]
+            e = {"file": v, "season": se, "episode": ep, "how": overrides.get("episodes_how") or "вручную"}
+            if rest and rest[0]:
+                e["episode_end"] = rest[0]
+            episodes.append(e)
             continue
         season, ep, how = parse.parse_episode(PurePath(v).name)
         if season is None:
@@ -180,6 +183,12 @@ def identify_tv(s: Scan, tmdb: TMDB | None, overrides: dict) -> dict:
     if show["chosen"] is None and tmdb is None and title:
         show["chosen"], show["score"] = _manual(title, year), NO_TMDB_CONFIDENCE
     conf = show["score"]
+
+    chosen0 = show.get("chosen") or {}
+    if tmdb is not None and chosen0.get("id") and (unmatched or _duplicates(episodes)):
+        matched = _match_episode_titles(episodes, unmatched, tmdb, chosen0["id"], set(manual_eps))
+        if matched:
+            problems.append(f"Серии сопоставлены по названиям в TMDB ({matched} файлов) — проверьте")
 
     if unmatched:
         problems.append(f"Не найден номер серии у {len(unmatched)} файлов")
@@ -219,6 +228,89 @@ def identify_tv(s: Scan, tmdb: TMDB | None, overrides: dict) -> dict:
     episodes.sort(key=lambda e: (e["season"], e["episode"], e["file"]))
     return {"show": show, "episodes": episodes, "unmatched": unmatched,
             "confidence": round(max(0.0, conf), 3), "problems": problems}
+
+
+PART_IN_FILE = re.compile(r"\((\d+(?:\s*[,\-–]\s*\d+)*)\s*(?:сер|серия|серии|ч|часть|part)\.?\)", re.I)
+PART_IN_NAME = re.compile(r"^(.*?)[\s.,:;-]*(?:часть|ч\.|серия|part)\s*(\d+)\s*\.?$", re.I)
+LEADING_NUM = re.compile(r"^\s*\d{1,3}[.\s_-]+")
+
+
+def _file_title(path: str) -> tuple[str, list[int]]:
+    """'1. Мягкая лапа смерти (1,2 сер.).avi' → ('Мягкая лапа смерти', [1, 2])"""
+    stem = PurePath(path).stem
+    parts: list[int] = []
+    if m := PART_IN_FILE.search(stem):
+        nums = [int(x) for x in re.findall(r"\d+", m[1])]
+        parts = list(range(nums[0], nums[-1] + 1)) if re.search(r"[-–]", m[1]) else nums
+        stem = stem[:m.start()] + stem[m.end():]
+    elif m := PART_IN_NAME.match(stem):
+        stem, parts = m[1], [int(m[2])]
+    return LEADING_NUM.sub("", stem).strip(" .-_"), parts
+
+
+def _episode_title(name: str) -> tuple[str, int | None]:
+    """'Мягкая лапа смерти. Часть 2' → ('Мягкая лапа смерти', 2)"""
+    if m := PART_IN_NAME.match(name):
+        return m[1].strip(" .,-"), int(m[2])
+    return name.strip(), None
+
+
+def _match_episode_titles(episodes: list[dict], unmatched: list[str], tmdb: TMDB, show_id: int,
+                          manual: set[str]) -> int:
+    """Map files to TMDB episodes by episode titles ("<case>. Часть N"), for releases numbered by case.
+
+    Returns how many files were matched; applies the result only when most files match.
+    """
+    cache: dict[int, list[dict]] = {}
+
+    def season_eps(n: int) -> list[dict]:
+        if n not in cache:
+            try:
+                cache[n] = [{**e, "base": parse._norm(_episode_title(e["name"])[0]),
+                             "part": _episode_title(e["name"])[1]} for e in tmdb.season_episodes(show_id, n)]
+            except (ClientError, KeyError):
+                cache[n] = []
+        return cache[n]
+
+    files = [(e["file"], e["season"]) for e in episodes if e["file"] not in manual] + [(f, None) for f in unmatched]
+    seasons = sorted({s for _, s in files if s}) or [1]
+    found: dict[str, tuple[int, int, int | None, str]] = {}
+    for f, season in files:
+        title, parts = _file_title(f)
+        if not title:
+            continue
+        for sn in ([season] if season else []) + [x for x in seasons if x != season]:
+            hits = []
+            for part in parts or [None]:
+                cands = [e for e in season_eps(sn) if parse.similarity(title, e["base"]) >= 0.8
+                         and (e["part"] == part or (e["part"] is None and part in (None, 1)))]
+                if len(cands) != 1:
+                    break
+                hits.append(cands[0])
+            if hits and len(hits) == len(parts or [None]):
+                end = hits[-1]["episode"] if len(hits) > 1 else None
+                found[f] = (sn, hits[0]["episode"], end, hits[0]["name"])
+                break
+    if not files or len(found) < 0.6 * len(files):
+        return 0
+    used = {(s, e) for s, e, _, _ in found.values()}
+    if len(used) != len(found):
+        return 0  # two files claim the same episode: don't guess
+    for e in episodes:
+        if e["file"] in found:
+            sn, ep, end, name = found[e["file"]]
+            e.update(season=sn, episode=ep, how=f"по названию в TMDB: «{name}»")
+            if end:
+                e["episode_end"] = end
+    for f in list(unmatched):
+        if f in found:
+            sn, ep, end, name = found[f]
+            e = {"file": f, "season": sn, "episode": ep, "how": f"по названию в TMDB: «{name}»"}
+            if end:
+                e["episode_end"] = end
+            episodes.append(e)
+            unmatched.remove(f)
+    return len(found)
 
 
 def _remap_absolute(episodes: list[dict], sizes: dict[int, int], manual: set[str]) -> bool:
