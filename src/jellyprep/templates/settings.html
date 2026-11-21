@@ -51,6 +51,7 @@
   {{ test("llm") }}
   <label>Спрашивать модель
     <select name="llm_confirm_auto" style="margin-bottom:6px"><option value="1"{% if s.llm_confirm_auto %} selected{% endif %}>если модель согласна с TMDB — продолжать без подтверждения</option><option value="0"{% if not s.llm_confirm_auto %} selected{% endif %}>всё равно спрашивать меня</option></select>
+    <select name="llm_search" style="margin-bottom:6px"><option value="0"{% if not s.llm_search %} selected{% endif %}>не искать в интернете</option><option value="1"{% if s.llm_search %} selected{% endif %}>разрешить модели искать в Википедии</option></select>
     <select name="llm_vision" style="margin-bottom:6px"><option value="auto"{% if s.llm_vision == "auto" %} selected{% endif %}>показывать модели кадры фильма (если она видит картинки)</option><option value="off"{% if s.llm_vision == "off" %} selected{% endif %}>только имена файлов</option></select>
     <select name="llm_reasoning" style="margin-bottom:6px"><option value="off"{% if s.llm_reasoning == "off" %} selected{% endif %}>рассуждения модели выключены (быстро)</option><option value="on"{% if s.llm_reasoning == "on" %} selected{% endif %}>рассуждения модели включены (медленно)</option></select>
     <select name="llm_auto"><option value="1"{% if s.llm_auto %} selected{% endif %}>автоматически, если правила не справились</option><option value="0"{% if not s.llm_auto %} selected{% endif %}>только по кнопке</option></select></label>

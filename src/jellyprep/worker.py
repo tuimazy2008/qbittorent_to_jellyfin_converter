@@ -18,7 +18,7 @@ import traceback
 from pathlib import Path, PurePath
 from typing import Any
 
-from . import config, executor, identify, llm, media, parse, planner, transcode
+from . import config, executor, identify, llm, media, parse, planner, research, transcode
 from .clients import QBit, TMDB, ClientError, Jellyfin, is_complete
 from .db import APPROVED, DB, DELETED, DONE, ERROR, NEW, REMOVED, REVIEW, RUNNING, SKIPPED
 
@@ -521,6 +521,9 @@ class Worker:
         seen = llm.ask(s, conv.prompt, conv, images=[f.read_bytes() for f in frames],
                        schema=llm.VISION_SCHEMA, system=llm.VISION_SYSTEM)
         self._save_conversation(item_id, conv)
+        if not hasattr(self, "_last_seen"):
+            self._last_seen = {}
+        self._last_seen[item_id] = seen   # for the search step, if it comes to that
         screen = [n for n in dict.fromkeys([seen.get("title"), seen.get("original_title")]) if n and n.strip()]
         guess = (seen.get("title_from_name") or "").strip()
         names = screen + ([guess] if guess and guess not in screen else [])
@@ -625,6 +628,46 @@ class Worker:
         overrides["show"] = {"tmdb_id": tid}
         return overrides, f"{read}; {pick.get('comment') or ''}".strip("; ")
 
+    def _research(self, item_id: int, s: dict, tmdb: TMDB | None, kind: str, context: str,
+                  auto_queries: list[str], seen: dict | None, file_names: list[str],
+                  duration: float) -> tuple[dict, str]:
+        """Let the model search: it proposes queries, we search Wikipedia, look the article titles up in TMDB,
+        and it picks among the real TMDB entries."""
+        if tmdb is None:
+            raise llm.LLMError("поиск без TMDB невозможен")
+        step = llm.Conversation(model=s["llm_model"], prompt=context, status="running")
+        with self._llm_lock:
+            self.llm_jobs[item_id] = step
+        q = llm.ask(s, context, step, schema=llm.QUERIES_SCHEMA, system=llm.QUERIES_SYSTEM)
+        self._save_conversation(item_id, step)
+        queries = [x for x in dict.fromkeys([*auto_queries, *(q.get("queries") or [])]) if x and x.strip()][:7]
+        wiki = research.search_all(queries)
+        names = research.names_from_articles(wiki)
+        found: dict[int, Any] = {}
+        for n in names[:8]:
+            try:
+                for c in tmdb.search("tv" if kind == "tv" else "movie", n)[:3]:
+                    found.setdefault(c.id, c)
+            except ClientError:
+                break
+        if not found:
+            raise llm.LLMError(f"поиск ({len(wiki)} статей в Википедии) не нашёл в TMDB подходящего "
+                               f"{'сериала' if kind == 'tv' else 'фильма'}. Укажите вручную")
+        ranked = list(found.values())[:6]
+        cards = [tmdb.tv_card(c.id) if kind == "tv" else tmdb.movie_card(c.id) for c in ranked]
+        choose = llm.Conversation(model=s["llm_model"], prompt=llm.build_choose_prompt(
+            file_names[0] if file_names else "", duration, seen or {}, cards, file_names, wiki), status="running")
+        with self._llm_lock:
+            self.llm_jobs[item_id] = choose
+        pick = llm.ask(s, choose.prompt, choose, schema=llm.CHOOSE_SCHEMA, system=llm.CHOOSE_SYSTEM)
+        tid = pick.get("tmdb_id")
+        if tid not in {c["id"] for c in cards}:
+            raise llm.LLMError("модель искала, но не уверена в ответе: " + (pick.get("comment") or ""))
+        key = "show" if kind == "tv" else "movies"
+        overrides = {"kind": kind, "hints": names[:3],
+                     key: {"tmdb_id": tid} if kind == "tv" else {"0": {"tmdb_id": tid}}}
+        return overrides, f"нашла через поиск ({', '.join(queries[:3])}): {pick.get('comment') or ''}"
+
     @staticmethod
     def _resolve_movie_title(overrides: dict, answer: dict, tmdb: TMDB | None) -> None:
         """The model read a title (e.g. from the credits) that wasn't among the candidates: look it up in TMDB.
@@ -693,10 +736,40 @@ class Worker:
             conv.model = s["llm_model"]
             started = time.time()
             if ident.get("kind") == "movie" and len(ident.get("movies") or []) == 1 and llm.supports_vision(s):
-                overrides, comment = self._movie_by_frames(item_id, item, sc, s, tmdb, conv)
+                try:
+                    overrides, comment = self._movie_by_frames(item_id, item, sc, s, tmdb, conv)
+                    if not (overrides.get("movies") or {}).get("0", {}).get("tmdb_id") and s.get("llm_search"):
+                        raise llm.LLMError(comment)
+                except llm.LLMError as e:
+                    if not s.get("llm_search"):
+                        raise
+                    main_file = max(sc.videos, key=lambda v: sc.sizes.get(v, 0))
+                    seen = getattr(self, "_last_seen", {}).pop(item_id, None) or {}
+                    year = parse.guess_title(PurePath(main_file).name)[1] or seen.get("year")
+                    context = (f"A film file «{PurePath(main_file).name}». Read from its frames: "
+                               f"title «{seen.get('title') or '?'}», credits: {'; '.join((seen.get('credits') or [])[:12]) or '—'}, "
+                               f"year {year or '?'}. So far: {e}")
+                    auto = [x for x in [seen.get("title"), seen.get("title_from_name")] if x]
+                    overrides, comment = self._research(item_id, s, tmdb, "movie", context, auto, seen,
+                                                        [PurePath(main_file).name],
+                                                        (self.probe_cached(sc.base / main_file) or {}).get("duration") or 0)
                 conv = self.llm_jobs.get(item_id, conv)
-            elif ident.get("kind") == "tv" and _show_is_weak(ident) and llm.supports_vision(s):
-                overrides, comment = self._show_by_frames(item_id, item, sc, s, tmdb, conv)
+            elif ident.get("kind") == "tv" and _show_is_weak(ident) and (llm.supports_vision(s) or s.get("llm_search")):
+                try:
+                    if not llm.supports_vision(s):
+                        raise llm.LLMError("модель не видит картинки")
+                    overrides, comment = self._show_by_frames(item_id, item, sc, s, tmdb, conv)
+                except llm.LLMError as e:
+                    if not s.get("llm_search"):
+                        raise
+                    files = sorted(sc.videos)
+                    ep_titles = [t for t in (parse.episode_title_from_name(f) for f in files) if t]
+                    context = (f"A TV series folder «{sc.name}» with episode files: "
+                               f"{'; '.join(PurePath(f).name for f in files[:15])}. "
+                               f"What we know so far: {e}")
+                    auto = [research.quoted(ep_titles)] if ep_titles else []
+                    overrides, comment = self._research(item_id, s, tmdb, "tv", context, auto, None,
+                                                        [PurePath(f).name for f in files], 0)
                 conv = self.llm_jobs.get(item_id, conv)
             else:
                 images = self._frames_for(item_id, ident, sc, s, conv)

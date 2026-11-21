@@ -162,6 +162,15 @@ def disemvoweled(name: str) -> str | None:
     return None
 
 
+def episode_title_from_name(filename: str) -> str:
+    """'S01E01 - The Pants Tent.mkv' → 'The Pants Tent' ('' when there's no title after the number)."""
+    stem = PurePath(filename).stem
+    m = re.search(r"(?i)(?:s\d{1,2}[ ._-]?e\d{1,3}|\d{1,2}x\d{1,3})[ ._-]*(.*)$", stem)
+    rest = (m[1] if m else "").strip(" .-_")
+    rest = re.split(r"(?i)(?:^|[ ._\[(]+)(?:\d{3,4}p|web|bdrip|bluray|hdtv|dvdrip|x26[45]|rus|eng)\b", rest)[0]
+    return rest.replace(".", " ").strip() if len(re.sub(r"[\W\d_]", "", rest)) >= 3 else ""
+
+
 def guess_kind(name: str) -> str:
     return "tv" if guessit(name).get("type") == "episode" else "movie"
 

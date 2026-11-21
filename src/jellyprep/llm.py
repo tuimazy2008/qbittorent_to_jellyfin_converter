@@ -199,9 +199,24 @@ CHOOSE_SCHEMA = {
 }
 
 
+QUERIES_SYSTEM = """You help identify a film or TV series by searching Wikipedia. Propose 2–5 short search
+queries most likely to find its Wikipedia article: episode titles in quotes, a decoded or transliterated
+title, names and studios from the credits with the year. Don't answer the question itself.
+Answer with JSON only."""
+
+QUERIES_SCHEMA = {
+    "type": "object",
+    "properties": {"queries": {"type": "array", "items": {"type": "string"}}},
+    "required": ["queries"],
+}
+
+
 def build_choose_prompt(file_name: str, duration: float, seen: dict, cards: list[dict],
-                        other_files: list[str] | None = None) -> str:
+                        other_files: list[str] | None = None, wiki: list[dict] | None = None) -> str:
     lines = [f"File: {file_name}, duration {int(duration // 60)} min."]
+    if wiki:
+        lines += ["", "Wikipedia search results:"] + [
+            f"- [{w['lang']}] {w['title']}: {w['snippet'][:200]}" for w in wiki[:12]] + [""]
     if other_files:
         lines.append("Episode files: " + "; ".join(other_files[:15]))
     lines += [f"Read from the frames: title «{seen.get('title') or '?'}» / «{seen.get('original_title') or '?'}»,"
