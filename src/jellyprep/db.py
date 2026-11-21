@@ -42,6 +42,12 @@ CREATE TABLE IF NOT EXISTS items (
     processed_at REAL,
     removed_at   REAL
 );
+CREATE TABLE IF NOT EXISTS probe_cache (
+    path  TEXT PRIMARY KEY,
+    size  INTEGER NOT NULL,
+    mtime REAL NOT NULL,
+    info  TEXT
+);
 CREATE TABLE IF NOT EXISTS log (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     ts      REAL NOT NULL,
@@ -158,6 +164,23 @@ class DB:
     def known_paths(self) -> set[str]:
         return {r["content_path"] for r in self.query(
             "SELECT content_path FROM items WHERE state NOT IN ('skipped', 'error')")}
+
+    def active_paths(self) -> set[str]:
+        """Content paths of items that are still in progress (not finished, skipped or failed)."""
+        return {r["content_path"] for r in self.query(
+            "SELECT content_path FROM items WHERE state IN ('new', 'review', 'approved', 'running')")}
+
+    def probe_get(self, path: str, size: int, mtime: float) -> dict | None | bool:
+        """Cached ffprobe summary; False when not cached (None = cached as unreadable)."""
+        rows = self.query("SELECT size, mtime, info FROM probe_cache WHERE path=?", (path,))
+        if not rows or rows[0]["size"] != size or abs(rows[0]["mtime"] - mtime) > 1:
+            return False
+        return json.loads(rows[0]["info"]) if rows[0]["info"] else None
+
+    def probe_set(self, path: str, size: int, mtime: float, info: dict | None) -> None:
+        self.execute("INSERT INTO probe_cache(path, size, mtime, info) VALUES(?, ?, ?, ?) "
+                     "ON CONFLICT(path) DO UPDATE SET size=excluded.size, mtime=excluded.mtime, info=excluded.info",
+                     (path, size, mtime, json.dumps(info, ensure_ascii=False) if info else None))
 
     def known_hashes(self) -> set[str]:
         return {r["hash"] for r in self.query("SELECT hash FROM items WHERE hash IS NOT NULL")}

@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from . import board, config, pipeline, transcode, worker as worker_mod
+from . import board, config, pipeline, survey, transcode, worker as worker_mod
 from .clients import ClientError, Jellyfin, TMDB, llm_models
 from .db import APPROVED, DB, DONE, ERROR, NEW, REMOVED, REVIEW, RUNNING, SKIPPED
 from .media import free_bytes
@@ -58,6 +58,7 @@ def create_app(db: DB | None = None, start_worker: bool = True) -> FastAPI:
 
     app = FastAPI(title="jellyprep", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.db, app.state.worker = db, worker
+    worker.surveys = survey.Surveys(worker)
     app.state.flash = {}
     app.add_middleware(SameOriginMiddleware)
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
@@ -209,33 +210,56 @@ def create_app(db: DB | None = None, start_worker: bool = True) -> FastAPI:
         return back("/setup/qbit")
 
     @app.get("/import", response_class=HTMLResponse)
-    def import_page(request: Request):
+    def import_page(request: Request, refresh: int = 0):
         s = config.load(db)
-        sources, jf_error = [], None
+        cats = db.categories()
+        libs, jf_error = [], None
         if s.get("jellyfin_url") and s.get("jellyfin_key"):
             try:
-                for lib in Jellyfin(s["jellyfin_url"], s["jellyfin_key"]).libraries():
-                    for loc in lib.get("Locations") or []:
-                        local = worker_mod.map_path(loc, [{"from": m["to"], "to": m["from"]}
-                                                          for m in s["jellyfin_path_map"]])
-                        sources.append({"library": lib["Name"], "type": lib.get("CollectionType") or "",
-                                        "path": local, "exists": os.path.isdir(local),
-                                        "is_new": local.rstrip("/").startswith(s["library_root"].rstrip("/"))})
+                libs = Jellyfin(s["jellyfin_url"], s["jellyfin_key"]).libraries()
             except Exception as e:  # noqa: BLE001
                 jf_error = str(e)
-        cats = list(db.categories().values())
-        for src in sources:
-            src["suggest"] = _suggest_category(src, cats)
-        return render(request, "import.html", sources=sources, jf_error=jf_error, cats=cats,
-                      result=app.state.flash.pop("import", None), JF_KIND={"movies": "movies", "tvshows": "tv"})
+        back_map = [{"from": m["to"], "to": m["from"]} for m in s["jellyfin_path_map"]]
+        lib_of = {}  # local path -> Jellyfin library name
+        old = []
+        root = s["library_root"].rstrip("/")
+        for lib in libs:
+            for loc in lib.get("Locations") or []:
+                local = worker_mod.map_path(loc, back_map).rstrip("/")
+                lib_of[local] = lib["Name"]
+                if not survey.is_video_library(lib) or local.startswith(root) or not os.path.isdir(local):
+                    continue
+                old.append({"library": lib["Name"], "path": local, "type": lib.get("CollectionType") or ""})
+        cat_list = [c for c in cats.values() if not re.search(r"(?i)music|audio|book", c["name"])]
+        for src in old:
+            src["suggest"] = _suggest_category(src, cat_list)
+            src["sv"] = worker.surveys.get(src["path"], "old", refresh=bool(refresh))
+        new = []
+        for c in cat_list:
+            dest = str(worker_mod.dest_root(s, c))
+            if os.path.isdir(dest) and dest not in [n["path"] for n in new]:
+                new.append({"category": c["name"], "path": dest, "library": lib_of.get(dest.rstrip("/")),
+                            "sv": worker.surveys.get(dest, "new", refresh=bool(refresh))})
+        targets = {c["name"]: lib_of.get(str(worker_mod.dest_root(s, c)).rstrip("/")) or c["library_dir"]
+                   for c in cat_list}
+        running = any(x["sv"]["state"] == "running" for x in old + new)
+        return render(request, "import.html", old=old, new=new, cats=cat_list, targets=targets, running=running,
+                      jf_error=jf_error, result=app.state.flash.pop("import", None))
 
     @app.post("/import")
     async def import_run(request: Request):
         form = await request.form()
-        path, cat = (form.get("path") or "").strip(), form.get("category", "")
+        path, cat, mode = (form.get("path") or "").strip(), form.get("category", ""), form.get("mode", "manual")
         try:
-            res = worker.import_folder(path, cat, delete_source=form.get("delete_source") == "1")
-            app.state.flash["import"] = {"ok": True, "path": path, "category": cat, **res}
+            if mode in ("old", "new"):
+                sv = worker.surveys.get(path, mode)
+                rows = (sv.get("result") or {}).get("entries", [])
+                want = {r["name"] for r in rows if r["status"] == ("move" if mode == "old" else "work")}
+                res = worker.import_folder(path, cat, delete_source=True, only=want, in_place=(mode == "new"))
+            else:
+                res = worker.import_folder(path, cat, delete_source=form.get("delete_source") == "1")
+            worker.surveys.invalidate(path)
+            app.state.flash["import"] = {"ok": True, "path": path, "category": cat, "mode": mode, **res}
         except Exception as e:  # noqa: BLE001
             app.state.flash["import"] = {"ok": False, "path": path, "message": str(e)}
         return back("/import")
@@ -437,10 +461,13 @@ def _suggest_category(src: dict, cats: list[dict]) -> str:
     """Pick the category whose type matches the Jellyfin library and whose name shares words with the path."""
     want = {"movies": "movies", "tvshows": "tv"}.get(src["type"], "auto")
     words = set(re.split(r"[\W_]+", src["path"].lower()))
+    last = set(re.split(r"[\W_]+", src["path"].rstrip("/").rsplit("/", 1)[-1].lower()))   # "series", "kids_movies"
+    series_like = bool(last & {"series", "tv", "shows", "serials", "сериалы"})
 
     def score(c):
         cw = set(re.split(r"[\W_]+", c["name"].lower()))
-        return ((c["kind"] == want) * 2 + bool(c["enabled"]) + len(cw & words) * 3
+        kind_ok = c["kind"] == ("tv" if series_like else want)   # the folder name beats Jellyfin's library type
+        return (kind_ok * 4 + bool(c["enabled"]) + len(cw & last) * 5 + len(cw & words)
                 - len(cw - words - {"movies", "series", "tv"}))
 
     return max(cats, key=score)["name"] if cats else ""

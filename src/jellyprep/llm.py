@@ -20,6 +20,8 @@ from .clients import TMDB, ClientError
 TIMEOUT = httpx.Timeout(300.0, connect=5.0)
 MAX_EPISODE_LINES = 400
 MAX_SECONDS = 20 * 60
+MAX_REASONING_CHARS = 40_000     # a model that thinks longer than this is going in circles
+MAX_TOKENS = 12_000
 
 SCHEMA = {
     "type": "object",
@@ -30,8 +32,8 @@ SCHEMA = {
         "year": {"type": ["integer", "null"]},
         "episodes": {"type": "array", "items": {
             "type": "object",
-            "properties": {"file": {"type": "string"}, "season": {"type": "integer"},
-                           "episode": {"type": "integer"}, "episode_end": {"type": ["integer", "null"]}},
+            "properties": {"file": {"type": "string"}, "season": {"type": ["integer", "null"]},
+                           "episode": {"type": ["integer", "null"]}, "episode_end": {"type": ["integer", "null"]}},
             "required": ["file", "season", "episode"]}},
         "comment": {"type": "string"},
     },
@@ -45,7 +47,11 @@ Rules:
   Russian releases often number by case/story ("3. Название (2 сер.)" = part 2 of story 3) or count
   episodes across seasons; use the TMDB episode titles to find the right season/episode.
   If one file contains several episodes, set episode_end to the last one.
+- Every TMDB episode can be used only once. If a file has no matching TMDB episode (an extra, or the second
+  part of an episode TMDB lists as one), set its season and episode to null and say so in "comment".
+  The person will decide; you don't have to resolve every file.
 - Copy file paths exactly as given. Do not invent files.
+- Decide once and answer. Do not re-check the same lists again and again.
 - Keep "comment" short: one sentence on how you decided, in Russian.
 Answer with JSON only."""
 
@@ -132,13 +138,14 @@ def ask(s: dict, prompt: str, conv: Conversation | None = None) -> dict:
     try:
         if kind == "ollama":
             req = {"url": f"{url}/api/chat", "json": {"model": model, "stream": True, "format": SCHEMA,
-                                                     "options": {"temperature": 0}, "messages": messages}}
+                                                     "options": {"temperature": 0, "num_predict": MAX_TOKENS},
+                                                     "messages": messages}}
         else:
             base = url if url.endswith("/v1") else f"{url}/v1"
             req = {"url": f"{base}/chat/completions",
                    "headers": {"Authorization": f"Bearer {s['llm_key']}"} if s.get("llm_key") else {},
                    "json": {"model": model, "temperature": 0, "stream": True,
-                            "stream_options": {"include_usage": True},
+                            "stream_options": {"include_usage": True}, "max_tokens": MAX_TOKENS,
                             "response_format": {"type": "json_schema", "json_schema": {
                                 "name": "identification", "strict": True, "schema": SCHEMA}},
                             "messages": messages}}
@@ -149,6 +156,9 @@ def ask(s: dict, prompt: str, conv: Conversation | None = None) -> dict:
                     raise LLMCancelled("отменено")
                 if time.time() - conv.started > MAX_SECONDS:
                     raise LLMError(f"модель думает дольше {MAX_SECONDS // 60} мин, прервано")
+                if len(conv.reasoning) > MAX_REASONING_CHARS and not conv.content.strip():
+                    raise LLMError("модель зациклилась: рассуждает по кругу и не отвечает. "
+                                   "Посмотрите её рассуждения — обычно там видно, что её смутило")
                 _feed(conv, kind, line)
     except LLMError as e:
         conv.status, conv.error, conv.finished = ("cancelled" if isinstance(e, LLMCancelled) else "error"), str(e), time.time()
@@ -232,7 +242,7 @@ def to_overrides(answer: dict, files: list[str], candidate_ids: set[int]) -> tup
         f = f if f in known else by_base.get(PurePath(str(f)).name)
         season, ep, end = e.get("season"), e.get("episode"), e.get("episode_end")
         if not f or not isinstance(season, int) or not isinstance(ep, int) or not (0 <= season < 100 and 0 < ep < 1000):
-            continue
+            continue  # the model left this file unmatched on purpose (or gave junk): the person decides
         if (season, ep) in seen:
             raise LLMError(f"модель дала два файла на серию S{season:02d}E{ep:02d}")
         seen.add((season, ep))

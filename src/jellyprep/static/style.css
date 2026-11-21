@@ -157,3 +157,11 @@ tr.warnrow td { background: var(--warn-bg); }
 .conv details { margin: 6px 0; }
 .conv-pre { white-space: pre-wrap; word-break: break-word; max-height: 420px; overflow: auto; background: var(--bg);
   border: 1px solid var(--line); border-radius: 6px; padding: 8px; font-size: 0.82rem; margin: 4px 0; }
+
+/* import page */
+.mcard { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; margin: 10px 0; }
+.mcard-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin-bottom: 4px; }
+.mcounts { margin: 4px 0 8px; padding-left: 18px; }
+.mcard-act { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+.mcard-act label { margin: 0; }
+.mlist { font-size: 0.88rem; } .mlist td { padding: 3px 6px; }

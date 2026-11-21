@@ -1,64 +1,113 @@
 {% extends "base.html" %}
-{% block title %}Перенос из старых библиотек · jellyprep{% endblock %}
-{% macro cat_select(selected, form="") -%}
-<select name="category"{% if form %} form="{{ form }}"{% endif %}>
-  {% for c in cats %}<option value="{{ c.name }}"{% if c.name == selected %} selected{% endif %}>{{ c.name }} → {{ c.library_dir }}{% if not c.enabled %} (выкл.){% endif %}</option>{% endfor %}
-</select>
-{%- endmacro %}
+{% block title %}Перенос · jellyprep{% endblock %}
 {% block content %}
-<h1>Перенос из старых библиотек</h1>
-<p class="lead">Файлы, которые лежат в старых папках и уже не раздаются, можно провести через jellyprep:
-он распознает их, при необходимости перекодирует и добавит дорожку «{{ VOICE_TITLE }}», положит в новую библиотеку
-и удалит оригинал после проверки.</p>
-<ul class="hint">
-  <li>Файлы, которые ещё раздаются в qBittorrent, пропускаются — их перенесёт торрентная часть после раздачи.</li>
-  <li>Каждый фильм или папка сериала становится отдельной задачей на странице «Задачи»: там видно, что будет сделано, и можно поправить распознавание.
-    Подтверждение работает по правилам выбранной категории.</li>
-  <li>Новая папка библиотеки (<code>{{ s.library_root }}</code>) тоже может быть источником: тогда файлы обрабатываются на месте — например, чтобы добавить дорожку «{{ VOICE_TITLE }}» к уже разложенным фильмам.</li>
-  {% if s.dry_run %}<li class="warn">Сейчас включён dry-run: задачи появятся, но ничего не будет перенесено и удалено.</li>{% endif %}
-</ul>
+{% if running %}<meta http-equiv="refresh" content="3">{% endif %}
+{% macro word(n, one, few, many) -%}{{ n }} {{ one if n % 10 == 1 and n % 100 != 11 else (few if n % 10 in [2, 3, 4] and n % 100 not in [12, 13, 14] else many) }}{%- endmacro %}
+{% macro counting(sv) -%}
+  <p class="muted">Считаю… {{ sv.done }} из {{ sv.total or "?" }}{% if sv.kind == "new" %} (первый раз каждый файл читается — потом быстро){% endif %}</p>
+  <div class="progress"><span style="width: {{ ((sv.done / sv.total * 100) if sv.total else 0)|round|int }}%"></span></div>
+{%- endmacro %}
+
+<h1>Перенос</h1>
 
 {% if result %}
-<div class="banner {{ 'warn' if not result.ok else '' }}">
+<div class="banner {{ '' if result.ok else 'bad' }}">
   {% if result.ok %}
-  <b>{{ result.path }}</b> → категория {{ result.category }}:
-  добавлено задач <b>{{ result.added|length }}</b>,
-  пропущено (раздаются) {{ result.torrent|length }},
-  уже в работе {{ result.known|length }},
-  без видео {{ result.empty|length }}.
-  {% if result.torrent %}<details><summary>Раздаются</summary><small>{{ result.torrent|join(", ") }}</small></details>{% endif %}
-  {% if result.added %}<p><a href="/items?state=review">Открыть задачи на проверке →</a></p>{% endif %}
-  {% else %}<span class="bad">{{ result.message }}</span>{% endif %}
+    {% if result.added %}✓ Поставлено в работу: {{ word(result.added|length, "задача", "задачи", "задач") }}.
+      Ход видно на <a href="/items">доске</a>.
+    {% else %}Ничего нового: всё уже в работе или раздаётся.{% endif %}
+  {% else %}✗ {{ result.message }}{% endif %}
 </div>
 {% endif %}
+{% if s.dry_run %}<p class="banner warn">Включён dry-run: задачи появятся на доске, но ничего не будет перенесено и удалено.</p>{% endif %}
 
-<h2>Библиотеки Jellyfin</h2>
-{% if jf_error %}<p class="bad">{{ jf_error }}</p>
-{% elif not sources %}<p class="muted">Jellyfin не подключён (шаг 8 мастера) — укажите папку вручную ниже.</p>
+<h2>Старые папки → новая библиотека</h2>
+<p class="hint">Забрать фильмы и сериалы из старых папок, разложить по новой библиотеке (с «{{ VOICE_TITLE }}» и
+перекодированием, если нужно) и <b>удалить старую копию после проверки</b>. То, что ещё раздаётся в qBittorrent,
+не трогается: оно переедет само, когда раздача закончится.</p>
+{% if jf_error %}<p class="bad">Jellyfin: {{ jf_error }}</p>{% endif %}
+{% for src in old %}
+{% set sv = src.sv %}{% set r = sv.result or {} %}{% set t = r.totals or {} %}
+<form method="post" class="mcard">
+  <input type="hidden" name="mode" value="old"><input type="hidden" name="path" value="{{ src.path }}">
+  <div class="mcard-head"><b>{{ src.library }}</b> <code>{{ src.path }}</code></div>
+  {% if sv.state == "running" and not r %}{{ counting(sv) }}
+  {% elif sv.error %}<p class="bad">{{ sv.error }}</p>
+  {% elif not r.entries %}<p class="muted">✓ Пусто — всё уже перенесено. Эту библиотеку можно удалить из Jellyfin.</p>
+  {% else %}
+  <ul class="mcounts">
+    {% if t.move %}<li><b>{{ word(t.move, "фильм или сериал", "фильма или сериала", "фильмов или сериалов") }}</b> · {{ t.size_move|size }} — можно перенести</li>{% endif %}
+    {% if t.seeding %}<li class="muted">{{ t.seeding }} ещё раздаются — переедут сами после раздачи</li>{% endif %}
+    {% if t.known %}<li class="muted">{{ t.known }} уже в работе — см. доску</li>{% endif %}
+    {% if t.leftover %}<li class="muted">{{ t.leftover }} — остатки прошлого переноса (то, что не удалось перенести, например битые файлы)</li>{% endif %}
+  </ul>
+  {% if t.move %}
+  <div class="mcard-act">
+    <label class="inline">Куда:
+      <select name="category">
+        {% for c in cats %}<option value="{{ c.name }}"{% if c.name == src.suggest %} selected{% endif %}>«{{ targets[c.name] }}» ({{ c.name }})</option>{% endfor %}
+      </select></label>
+    <button>Перенести {{ t.move }}</button>
+  </div>
+  {% endif %}
+  <details><summary>Список ({{ r.entries|length }})</summary>
+    <table class="mlist">{% for e in r.entries %}
+      <tr><td>{{ {"move": "→", "seeding": "⏸", "known": "⚙", "leftover": "·"}.get(e.status, "") }}</td><td>{{ e.name }}</td>
+        <td class="muted">{{ e.size|size }}</td>
+        <td class="muted">{{ {"move": "перенесётся", "seeding": "раздаётся", "known": "уже в работе", "leftover": "остатки прошлого переноса"}.get(e.status, "") }}</td></tr>
+    {% endfor %}</table></details>
+  {% if sv.state == "running" %}<p class="muted small">обновляю цифры…</p>{% endif %}
+  {% endif %}
+</form>
 {% else %}
-{% for src in sources %}<form id="imp{{ loop.index }}" method="post"></form>{% endfor %}
-<div class="table-wrap"><table>
-  <tr><th>Библиотека</th><th>Папка</th><th>В какую категорию</th><th>Удалить оригинал</th><th></th></tr>
-  {% for src in sources %}
-  {% set f = "imp" ~ loop.index %}
-  <tr>
-    <td><b>{{ src.library }}</b>{% if src.is_new %} <span class="pill ok">новая</span>{% endif %}</td>
-    <td><code>{{ src.path }}</code>{% if not src.exists %}<br><small class="bad">jellyprep не видит эту папку</small>{% endif %}
-      <input type="hidden" name="path" value="{{ src.path }}" form="{{ f }}"></td>
-    <td>{{ cat_select(src.suggest, f) }}</td>
-    <td>{% if src.is_new %}<small class="muted">обработка на месте</small><input type="hidden" name="delete_source" value="1" form="{{ f }}">
-      {% else %}<input type="checkbox" name="delete_source" value="1" checked form="{{ f }}">{% endif %}</td>
-    <td><button form="{{ f }}"{% if not src.exists %} disabled{% endif %}>{{ "Обработать" if src.is_new else "Перенести" }}</button></td>
-  </tr>
-  {% endfor %}
-</table></div>
-{% endif %}
+<p class="muted">{{ "Старых папок с фильмами и сериалами в Jellyfin не найдено." if not jf_error else "" }}
+  Можно указать папку вручную внизу.</p>
+{% endfor %}
 
-<h2>Другая папка</h2>
+<h2>Доделать новую библиотеку</h2>
+<p class="hint">Файлы, которые уже лежат в новой библиотеке, но обработаны не полностью: без дорожки
+«{{ VOICE_TITLE }}», с лишними языками или слишком тяжёлые (4K, HDR, огромный битрейт). Обработка идёт на месте,
+файлы никуда не переезжают. Перекодирование ждёт ночного окна.</p>
+{% for lib in new %}
+{% set sv = lib.sv %}{% set r = sv.result or {} %}{% set t = r.totals or {} %}
+<form method="post" class="mcard">
+  <input type="hidden" name="mode" value="new"><input type="hidden" name="path" value="{{ lib.path }}">
+  <input type="hidden" name="category" value="{{ lib.category }}">
+  <div class="mcard-head"><b>«{{ lib.library or lib.category }}»</b> <code>{{ lib.path }}</code></div>
+  {% if sv.state == "running" and not r %}{{ counting(sv) }}
+  {% elif sv.error %}<p class="bad">{{ sv.error }}</p>
+  {% elif not r.entries %}<p class="muted">Пока пусто.</p>
+  {% else %}
+  <ul class="mcounts">
+    <li>{{ word(r.entries|length, "фильм или сериал", "фильма или сериала", "фильмов или сериалов") }} · {{ t.size|size }}</li>
+    {% if t.work %}
+      <li><b>{{ t.work }} нужно доделать</b>:
+        {% if t.voice %}{{ word(t.voice, "файл", "файла", "файлов") }} без «{{ VOICE_TITLE }}»{% endif %}{% if t.voice and t.heavy %}, {% endif %}
+        {% if t.heavy %}{{ word(t.heavy, "файл", "файла", "файлов") }} перекодировать{% endif %}</li>
+    {% else %}<li class="ok">✓ Всё готово</li>{% endif %}
+    {% if t.known %}<li class="muted">{{ t.known }} уже в работе — см. доску</li>{% endif %}
+  </ul>
+  {% if t.work %}<div class="mcard-act"><button>Доделать {{ t.work }}</button></div>{% endif %}
+  {% if t.work %}<details><summary>Что именно</summary>
+    <table class="mlist">{% for e in r.entries if e.status == "work" %}
+      <tr><td>{{ e.name }}</td><td class="muted">{% if e.voice %}без звука: {{ e.voice }}{% endif %}{% if e.voice and e.heavy %} · {% endif %}{% if e.heavy %}тяжёлых: {{ e.heavy }}{% endif %}</td></tr>
+    {% endfor %}</table></details>{% endif %}
+  {% if sv.state == "running" %}<p class="muted small">обновляю цифры…</p>{% endif %}
+  {% endif %}
+</form>
+{% endfor %}
+
+<p><a href="/import?refresh=1">Пересчитать</a> <span class="muted small">(цифры обновляются сами раз в 10 минут)</span></p>
+
+<details class="explain"><summary>Другая папка</summary>
 <form method="post" class="panel">
-  <label>Папка (как её видит jellyprep) <input name="path" placeholder="/media/movies/adult_movies" required></label>
-  <label>Категория {{ cat_select("") }}</label>
+  <input type="hidden" name="mode" value="manual">
+  <p class="hint">Любая папка, которую видит jellyprep. Каждый фильм или папка сериала в ней станет задачей на доске.</p>
+  <label>Папка <input name="path" placeholder="/media/movies/adult_movies" required></label>
+  <label>Категория
+    <select name="category">{% for c in cats %}<option value="{{ c.name }}">«{{ targets[c.name] }}» ({{ c.name }})</option>{% endfor %}</select></label>
   <label class="inline"><input type="checkbox" name="delete_source" value="1" checked> удалить оригинал после переноса</label>
   <p><button>Найти файлы</button></p>
 </form>
+</details>
 {% endblock %}

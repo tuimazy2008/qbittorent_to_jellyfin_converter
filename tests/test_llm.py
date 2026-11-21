@@ -231,3 +231,23 @@ def test_always_confirm_category_still_waits(db, tmp_path, monkeypatch, tmdb):
     w.ask_llm(item_id, wait=True)
     item = db.item(item_id)
     assert item["state"] == "review" and "модель согласна с TMDB — подтвердите" in item["note"]
+
+
+def test_looping_model_is_stopped(monkeypatch):
+    conv = llm.Conversation(model="m", prompt="p")
+
+    def lines():
+        while True:
+            yield sse(reasoning_content="Wait, I'll check the file names again. " * 50)
+
+    monkeypatch.setattr(llm.httpx, "stream", lambda *a, **kw: FakeStream(lines(), {}))
+    with pytest.raises(llm.LLMError, match="зациклилась"):
+        llm.ask({"llm_kind": "openai", "llm_url": "http://lm", "llm_model": "m"}, "p", conv)
+    assert conv.status == "error" and len(conv.reasoning) > llm.MAX_REASONING_CHARS
+
+
+def test_model_may_leave_a_file_unmatched():
+    ans = {"kind": "tv", "tmdb_id": 4556, "title": "Клиника", "year": 2001, "comment": "финал в TMDB одной серией",
+           "episodes": [{"file": FILES[0], "season": 8, "episode": 18}, {"file": FILES[1], "season": None, "episode": None}]}
+    ov, comment = llm.to_overrides(ans, FILES, {4556})
+    assert ov["episodes"] == {FILES[0]: [8, 18, None]} and "одной серией" in comment

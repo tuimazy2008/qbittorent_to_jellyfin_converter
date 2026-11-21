@@ -538,7 +538,8 @@ class Worker:
             self.db.log(str(e), "warning")
 
     # --- import from existing folders ---------------------------------------
-    def import_folder(self, folder: str, category: str, delete_source: bool = True) -> dict:
+    def import_folder(self, folder: str, category: str, delete_source: bool = True,
+                      only: set[str] | None = None, in_place: bool = False) -> dict:
         """Queue every movie/show in `folder` that isn't part of a torrent.
 
         Each top-level entry (a video file or a sub-folder with videos) becomes one item. Entries that
@@ -552,10 +553,11 @@ class Worker:
             raise ValueError(f"Нет категории {category}")
         torrent_paths = [Path(map_path(t["content_path"], s["path_map"])) for t in qbit_client(s).torrents()]
         torrent_inodes = _inodes(torrent_paths)
-        known = self.db.known_paths()
+        # in the new library, files finished earlier may need work again (e.g. the voice track was off)
+        known = self.db.active_paths() if in_place else self.db.known_paths()
         res = {"added": [], "torrent": [], "known": [], "empty": []}
         for entry in sorted(root.iterdir()):
-            if entry.name.startswith("."):
+            if entry.name.startswith(".") or (only is not None and entry.name not in only):
                 continue
             if str(entry) in known:
                 res["known"].append(entry.name)
