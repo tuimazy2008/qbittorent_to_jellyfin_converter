@@ -19,7 +19,7 @@
     const open = panels.has(r.key);
     const acts = r.actions.map((a) => a.open
       ? `<button class="small secondary" data-open="${r.id}">${esc(a.label)}</button>`
-      : `<button class="small" data-post="${esc(a.post)}">${esc(a.label)}</button>`).join(" ");
+      : `<button class="small" data-post="${esc(a.post)}"${a.title ? ` title="${esc(a.title)}"` : ""}>${esc(a.label)}</button>`).join(" ");
     return `<div class="brow g-${r.group}${open ? " open" : ""}" id="${r.key}" data-key="${r.key}" data-id="${r.id ?? ""}">
       <div class="brow-grid"${r.id ? ` data-toggle="${r.id}"` : ""}>
         <div class="btitle"><b>${esc(r.title)}</b>

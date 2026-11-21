@@ -13,6 +13,7 @@ from .clients import TMDB, Candidate, ClientError
 from .media import Scan
 
 NO_TMDB_CONFIDENCE = 0.5
+SERIES_PROBLEM = "Среди фильмов TMDB такого нет, это сериал — проверьте"
 NO_YEAR_PROBLEM = "Нет года в имени, а в TMDB несколько похожих — проверьте"
 
 
@@ -99,9 +100,34 @@ def identify(s: Scan, kind_hint: str, tmdb: TMDB | None, overrides: dict | None 
         kind = _detect_kind(s)
     ident = identify_tv(s, tmdb, overrides, hints) if kind == "tv" else identify_movies(s, tmdb, overrides, hints)
     ident["kind"] = kind
+    if kind == "movie" and tmdb is not None and not overrides.get("kind"):
+        switched = _maybe_series(s, tmdb, ident, overrides, hints)
+        if switched:
+            return switched
     if hints:
         ident["hints"] = hints
     return ident
+
+
+def _maybe_series(s: Scan, tmdb: TMDB, ident: dict, overrides: dict, hints: list[str] | None) -> dict | None:
+    """A "film" nobody found among TMDB films but clearly present among TV shows is a series
+    ("Незнайка на Луне_01-06.avi" — a 12-episode cartoon series)."""
+    movies = ident.get("movies") or []
+    if not movies or any((m.get("chosen") or {}).get("id") and m.get("score", 0) >= 0.6 for m in movies):
+        return None
+    titles = [m["guess"]["title"] for m in movies if m.get("guess", {}).get("title")] + [parse.guess_title(s.name)[0]]
+    try:
+        hit = match(tmdb, "tv", [t for t in dict.fromkeys(titles) if t], None)
+    except ClientError:
+        return None
+    if not hit.get("chosen") or hit["score"] < 0.9:
+        return None
+    tv = identify_tv(s, tmdb, {**overrides, "show": {"tmdb_id": hit["chosen"]["id"]}}, hints)
+    tv["kind"] = "tv"
+    tv["problems"].insert(0, f"{SERIES_PROBLEM}: «{hit['chosen']['title']}» ({hit['chosen'].get('year') or '?'})")
+    tv["confidence"] = min(tv["confidence"], 0.75)
+    tv["show"]["manual"] = False
+    return tv
 
 
 def _detect_kind(s: Scan) -> str:
@@ -178,6 +204,9 @@ def identify_tv(s: Scan, tmdb: TMDB | None, overrides: dict, hints: list[str] | 
             episodes.append(e)
             continue
         season, ep, how = parse.parse_episode(PurePath(v).name)
+        rng = parse.episode_range(PurePath(v).name)
+        if rng and (ep is None or ep == rng[0]):
+            ep, how = rng[0], (how + ", " if how else "") + f"серии {rng[0]}–{rng[1]} в одном файле"
         if season is None:
             season = parse.season_from_dirs(v, siblings)
         if season is None:
@@ -188,10 +217,17 @@ def identify_tv(s: Scan, tmdb: TMDB | None, overrides: dict, hints: list[str] | 
         if season is None:
             season = 1
             how += ", сезон не найден → 1"
-        episodes.append({"file": v, "season": season, "episode": ep, "how": how})
+        e = {"file": v, "season": season, "episode": ep, "how": how}
+        if rng and ep == rng[0]:
+            e["episode_end"] = rng[1]
+        episodes.append(e)
 
     base_title = re.sub(r"[\s.:-]*\d+(?:\.\d+)?$", "", title).strip()   # "Пин-код 2" → also "Пин-код"
-    queries = [q for q in dict.fromkeys([title, *alts, base_title, *(parse.guess_title(h)[0] for h in hints or [])]) if q]
+    # the folder may be named "Neznayka" while the files say "Незнайка на Луне_01-06"
+    file_titles = [parse.guess_title(PurePath(v).name)[0] for v in sorted(s.videos)[:3]]
+    file_titles = [f for f in dict.fromkeys(file_titles) if len(re.sub(r"[\W\d_]", "", f)) >= 4][:2]
+    queries = [q for q in dict.fromkeys([title, *alts, base_title, *file_titles,
+                                         *(parse.guess_title(h)[0] for h in hints or [])]) if q]
     show = {"guess": {"title": title, "year": year}, **_safe_match(tmdb, "tv", queries, year, problems)}
     _safe_choice(show, tmdb, "tv", overrides.get("show") or _id_in_name(s.name), problems)
     if show["chosen"] is None and tmdb is None and title:

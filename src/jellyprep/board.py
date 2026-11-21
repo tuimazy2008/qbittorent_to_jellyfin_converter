@@ -94,7 +94,9 @@ def item_row(item: dict, s: dict, cat: dict | None, logs: list[dict], queue_ahea
         elif llm.configured(s):
             actions.append({"label": "Спросить модель", "post": f"/items/{item['id']}/ask-llm"})
         if (item.get("plan") or {}).get("actions"):
-            actions.append({"label": "Подтвердить", "post": f"/items/{item['id']}/approve"})
+            summ = pipeline.confirm_summary(item, s, cat)
+            actions.append({"label": "Подтвердить", "post": f"/items/{item['id']}/approve",
+                            "title": " · ".join(summ["lines"]) if summ else ""})
     elif state == ERROR:
         icon, group, line = "✗", "decision", f"ошибка: {item.get('error') or reason}"
         actions += [{"label": "Открыть", "open": True}, {"label": "Повторить", "post": f"/items/{item['id']}/approve"}]

@@ -29,9 +29,11 @@ def describe_identity(ident: dict) -> str:
     if ident.get("kind") == "tv":
         c = (ident.get("show") or {}).get("chosen") or {}
         eps = ident.get("episodes") or []
+        n_eps = sum((e.get("episode_end") or e["episode"]) - e["episode"] + 1 for e in eps)
         seasons = sorted({e["season"] for e in eps})
         s_txt = f"сезон {seasons[0]}" if len(seasons) == 1 else f"сезоны {seasons[0]}–{seasons[-1]}" if seasons else ""
-        return (f"Сериал «{c.get('title', '?')}» ({c.get('year') or '?'}), {len(eps)} сер., {s_txt}"
+        files = f" в {len(eps)} файлах" if n_eps != len(eps) else ""
+        return (f"Сериал «{c.get('title', '?')}» ({c.get('year') or '?'}), {n_eps} сер.{files}, {s_txt}"
                 + (f" · TMDB {c['id']}" if c.get("id") else " · без TMDB"))
     movies = ident.get("movies") or []
     names = [f"«{(m.get('chosen') or {}).get('title', '?')}» ({(m.get('chosen') or {}).get('year') or '?'})" for m in movies]
@@ -204,3 +206,64 @@ def _gb(n: float) -> str:
 def _dur(sec: float) -> str:
     sec = int(sec)
     return f"{sec // 3600} ч {sec % 3600 // 60} мин" if sec >= 3600 else f"{sec // 60} мин"
+
+
+def confirm_summary(item: dict, s: dict, cat: dict | None) -> dict | None:
+    """What exactly happens when the person presses "confirm": shown right above the button."""
+    from . import executor  # local import: executor pulls transcode/media
+    ident, plan = item.get("ident") or {}, item.get("plan") or {}
+    actions = plan.get("actions") or []
+    if not ident or not actions:
+        return None
+    videos = [a for a in actions if a["type"] == "video"]
+    lines: list[str] = []
+    what = describe_identity(ident)
+    lines.append(("📺 " if ident.get("kind") == "tv" else "🎬 ") + what)
+    target = plan.get("target") or ""
+    lib = (cat or {}).get("library_dir") or (cat or {}).get("name") or ""
+    lines.append(f"📁 ляжет в «{lib}»: {target.rsplit('/', 1)[-1] if target else '?'}")
+    files = [(a["dst"].replace(target + "/", "") if target else a["dst"], a["src"].rsplit("/", 1)[-1], a["action"])
+             for a in videos]
+    counts: dict[str, int] = {}
+    for a in videos:
+        counts[a["action"]] = counts.get(a["action"], 0) + 1
+    night = s.get("night_only") and not plan.get("run_now")
+    if counts.get("transcode"):
+        voice = " + «Голос громче»" if s.get("voice_track") else ""
+        lines.append(f"⚙ перекодировать {counts['transcode']} в H.264{voice}"
+                     + (f" — ночью с {s.get('night_start')}" if night else " — сразу"))
+    if counts.get("process"):
+        lines.append(f"🔊 обработать звук у {counts['process']} (дорожка «Голос громче», лишние языки)")
+    if counts.get("hardlink"):
+        lines.append(f"🔗 {counts['hardlink']} — без изменений (хардлинк, места не занимает)")
+    if counts.get("remux"):
+        lines.append(f"📦 перепаковать в MKV: {counts['remux']}")
+    if counts.get("exists"):
+        lines.append(f"✓ уже на месте: {counts['exists']}")
+    need = executor.needed_bytes(plan, s.get("link_fallback", "copy"))
+    if need:
+        lines.append(f"💾 на время работы нужно ~{need / 1024 ** 3:.1f} ГБ свободного места")
+    is_torrent = bool(item.get("hash")) and item.get("source", "torrent") == "torrent"
+    if is_torrent:
+        if cat and cat.get("delete_enabled") and (cat.get("seed_ratio") or cat.get("seed_days")):
+            cond = " или ".join(x for x in (f"рейтинг ≥ {cat['seed_ratio']:g}" if cat.get("seed_ratio") else "",
+                                             f"{cat['seed_days']:g} дн. раздачи" if cat.get("seed_days") else "") if x)
+            lines.append(f"🗑 торрент удалится из qBittorrent после проверки, когда {cond}")
+        else:
+            lines.append("🗑 торрент останется в qBittorrent (удаление выключено)")
+    elif any(a.get("inplace") for a in actions):
+        lines.append("↺ файлы обрабатываются на месте, никуда не переезжают")
+    elif (item.get("options") or {}).get("delete_source", True):
+        lines.append(f"🗑 оригиналы в {item['content_path']} удалятся после проверки")
+    else:
+        lines.append("📎 оригиналы останутся на месте")
+    left = [f.rsplit("/", 1)[-1] for f in ident.get("unmatched") or []] + \
+           [f for f in plan.get("skipped") or [] if f.lower().endswith((".mkv", ".avi", ".mp4", ".ts", ".m4v"))]
+    if left:
+        lines.append(f"⚠ не тронет {len(left)}: " + ", ".join(left[:3]) + (" …" if len(left) > 3 else ""))
+    verb = ("Разложить и перекодировать ночью" if counts.get("transcode") and night
+            else "Разложить и перекодировать" if counts.get("transcode")
+            else "Разложить и обработать звук" if counts.get("process") else "Разложить")
+    noun = "файл" if len(videos) == 1 else ("файла" if 1 < len(videos) < 5 else "файлов")
+    return {"lines": lines, "files": files[:8], "more": max(len(files) - 8, 0),
+            "button": f"{verb} {len(videos)} {noun}"}

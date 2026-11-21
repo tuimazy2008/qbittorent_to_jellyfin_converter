@@ -168,3 +168,9 @@ tr.warnrow td { background: var(--warn-bg); }
 
 .frames { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; margin: 6px 0; }
 .frames img { width: 100%; border-radius: 4px; display: block; }
+
+.confirm { border: 1px solid var(--accent); border-radius: 10px; padding: 8px 14px; margin: 10px 0; background: var(--card-sel); }
+.confirm h3 { margin: 8px 0 4px; }
+.summary-list { list-style: none; padding: 0; margin: 4px 0; } .summary-list li { padding: 2px 0; }
+.catrow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 0; }
+.catrow label { margin: 0; }

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
 import os
 import threading
 import time
@@ -26,6 +27,32 @@ KIND_HINT = {"movies": "movie", "tv": "tv", "auto": "auto"}
 LLM_THINKING = "модель думает…"
 LLM_QUEUED = "в очереди к модели"
 FRAMES_DIR = config.CONFIG_DIR / "frames"
+CATEGORY_PROBLEM = "Категория"
+
+
+def category_hint(kind: str, cat: dict, cats: dict[str, dict]) -> str | None:
+    """A series in a films category (or the other way round): which category would fit better."""
+    want = {"tv": "tv", "movie": "movies"}.get(kind)
+    if not want or cat.get("kind") not in ("movies", "tv") or cat["kind"] == want:
+        return None
+    words = set(re.split(r"[\W_]+", cat["name"].lower())) - {"movies", "series", "tv", ""}
+
+    def score(c: dict) -> tuple:
+        cw = set(re.split(r"[\W_]+", c["name"].lower()))
+        return (len(cw & words), bool(c["enabled"]))
+
+    fits = [c for c in cats.values() if c["kind"] == want]
+    return max(fits, key=score)["name"] if fits else None
+
+
+def set_category(db: DB, item_id: int, category: str) -> None:
+    item = db.item(item_id)
+    if not item or category not in db.categories() or item["state"] not in (NEW, REVIEW, ERROR, APPROVED):
+        return
+    db.update_item(item_id, category=category, state=REVIEW if item["state"] == APPROVED else item["state"])
+    db.log(f"Категория изменена: {item['category']} → {category}", item_id=item_id)
+
+
 INFO_PROBLEMS = ("Серии сопоставлены по названиям", "Сквозная нумерация", "Нет года в имени")
 
 
@@ -307,6 +334,13 @@ class Worker:
             ident = identify.identify(sc, KIND_HINT.get(cat["kind"], "auto"), tmdb_client(s), overrides,
                                       hints=self.media_hints(sc))
             ident["overrides"] = overrides
+            hint = category_hint(ident["kind"], cat, self.db.categories())
+            if hint and not overrides.get("category_ok"):
+                kind_word = "сериал" if ident["kind"] == "tv" else "фильм"
+                for_word = "фильмов" if cat["kind"] == "movies" else "сериалов"
+                ident["problems"].insert(0, f"{CATEGORY_PROBLEM}: похоже, это {kind_word}, а категория "
+                                            f"«{cat['name']}» — для {for_word}. Подходит «{hint}»?")
+                ident["category_hint"] = hint
             plan = planner.build(ident, sc, dest_root(s, cat), s, probe=safe_probe)
         except Exception as e:
             self.db.update_item(item_id, state=ERROR, error=str(e))
@@ -338,8 +372,10 @@ class Worker:
                     f"{'одобрено' if state == APPROVED else 'на проверку'}", item_id=item_id)
         tr = self.db.item(item_id).get("trace") or {}
         # the model either proposes an answer (rules failed) or double-checks the rules' answer
+        model_can_help = [p for p in problems if not p.startswith(CATEGORY_PROBLEM)] or conf < s["confidence"]
         if (state == REVIEW and not manual and plan["actions"] and s.get("llm_auto") and llm.configured(s)
-                and not tr.get("llm_tried") and not (cat["approval"] == "always_confirm" and not problems)):
+                and not tr.get("llm_tried") and model_can_help
+                and not (cat["approval"] == "always_confirm" and not problems)):
             self.ask_llm(item_id, auto=True)
 
     def approve(self, item_id: int, run_now: bool = False) -> None:

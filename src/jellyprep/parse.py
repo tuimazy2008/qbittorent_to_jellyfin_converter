@@ -51,6 +51,19 @@ def parse_episode(filename: str) -> tuple[int | None, int | None, str]:
     return None, None, ""
 
 
+EP_RANGE = re.compile(r"(?<![\d.])(\d{1,3})\s*[-–]\s*(\d{1,3})(?!\d|p\b)")
+
+
+def episode_range(filename: str) -> tuple[int, int] | None:
+    """'Незнайка на Луне_01-06.avi' → (1, 6): several episodes in one file."""
+    stem = PurePath(filename).stem
+    for m in EP_RANGE.finditer(stem):
+        a, b = int(m[1]), int(m[2])
+        if 0 < a < b and b - a < 40 and not (1900 <= a <= 2100):
+            return a, b
+    return None
+
+
 def season_from_name(name: str) -> int | None:
     for rx in SEASON_DIR:
         if m := rx.search(name):

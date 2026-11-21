@@ -9,12 +9,36 @@
 <h3>Путь задачи</h3>
 {{ pipe_full(pipe) }}
 
+{% if item.state in ["new", "review", "error", "approved"] %}
+<div class="confirm">
+  <form method="post" action="/items/{{ item.id }}/category" class="catrow">
+    <label class="inline">Категория:
+      <select name="category" onchange="this.form.submit()">
+        {% for c in all_cats %}<option value="{{ c.name }}"{% if c.name == item.category %} selected{% endif %}>{{ c.name }} → {{ c.library_dir }}{% if c.name == cat_hint %} ★ подходит лучше{% endif %}</option>{% endfor %}
+      </select></label>
+    {% if cat_hint %}
+      <button class="small" name="category" value="{{ cat_hint }}">Перенести в «{{ cat_hint }}»</button>
+      <button class="small secondary" name="keep" value="1">Оставить «{{ item.category }}»</button>
+    {% endif %}
+  </form>
+  {% if summary %}
+  <h3>Если подтвердить</h3>
+  <ul class="summary-list">{% for l in summary.lines %}<li>{{ l }}</li>{% endfor %}</ul>
+  <details><summary>Файлы ({{ summary.files|length + summary.more }})</summary>
+    <table class="mlist">{% for dst, src, act in summary.files %}
+      <tr><td>{{ dst }}</td><td class="muted">← {{ src }}</td><td class="muted">{{ ACTION_LABELS.get(act, act) }}</td></tr>
+    {% endfor %}{% if summary.more %}<tr><td class="muted" colspan="3">… ещё {{ summary.more }} — в таблице «План» ниже</td></tr>{% endif %}</table>
+  </details>
+  {% endif %}
+</div>
+{% endif %}
+
 <div class="actions">
   {% if item.state in ["review", "error"] and plan.actions %}
-  <form method="post" action="/items/{{ item.id }}/approve"><button>Подтвердить и выполнить</button></form>
+  <form method="post" action="/items/{{ item.id }}/approve"><button>{{ summary.button if summary else "Подтвердить и выполнить" }}</button></form>
   {% endif %}
   {% if item.state in ["review", "error", "approved"] and needs_window(plan) and s.night_only and not plan.run_now %}
-  <form method="post" action="/items/{{ item.id }}/run-now"><button class="secondary" title="Перекодирование обычно ждёт ночного окна {{ s.night_start }}–{{ s.night_end }}">{{ "Подтвердить и выполнить сейчас" if item.state != "approved" else "Выполнить сейчас, не ждать ночи" }}</button></form>
+  <form method="post" action="/items/{{ item.id }}/run-now"><button class="secondary" title="Перекодирование обычно ждёт ночного окна {{ s.night_start }}–{{ s.night_end }}">{{ "…и перекодировать сейчас, не ждать ночи" if item.state != "approved" else "Перекодировать сейчас, не ждать ночи" }}</button></form>
   {% endif %}
   {% if item.state not in ["done", "removed"] %}
   <form method="post" action="/items/{{ item.id }}/reanalyze"><button class="secondary">Распознать заново</button></form>

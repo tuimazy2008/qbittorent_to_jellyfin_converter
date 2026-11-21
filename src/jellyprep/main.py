@@ -121,7 +121,10 @@ def create_app(db: DB | None = None, start_worker: bool = True) -> FastAPI:
                               worker.status.get("job"))
         live = worker.llm_jobs.get(item_id)
         convs = ([{**live.as_dict(), "live": True}] if live else []) + ((item.get("trace") or {}).get("llm_log") or [])
-        return {"item": item, "cat": cat, "due": due, "logs": logs, "pipe": pipe, "convs": convs, "now": time.time()}
+        cats = db.categories()
+        return {"item": item, "cat": cat, "due": due, "logs": logs, "pipe": pipe, "convs": convs, "now": time.time(),
+                "summary": pipeline.confirm_summary(item, config.load(db), cat), "all_cats": list(cats.values()),
+                "cat_hint": (item.get("ident") or {}).get("category_hint")}
 
     def back_item(request: Request, item_id: int) -> RedirectResponse:
         """After an action, return to the board (with the row open) if that's where it came from."""
@@ -153,6 +156,21 @@ def create_app(db: DB | None = None, start_worker: bool = True) -> FastAPI:
         if not path.is_file():
             return JSONResponse({"error": "not found"}, status_code=404)
         return FileResponse(path, media_type="image/jpeg")
+
+    @app.post("/items/{item_id}/category")
+    async def item_category(request: Request, item_id: int):
+        form = await request.form()
+        item = db.item(item_id)
+        if item:
+            ov = (item.get("ident") or {}).get("overrides") or {}
+            if form.get("keep") == "1":
+                worker.analyze(item_id, {**ov, "category_ok": True})
+                db.log(f"Категория «{item['category']}» оставлена", item_id=item_id)
+            else:
+                worker_mod.set_category(db, item_id, form.get("category", ""))
+                ov = {k: v for k, v in ov.items() if k not in ("kind", "category_ok")}
+                worker.analyze(item_id, ov)
+        return back_item(request, item_id)
 
     @app.post("/items/{item_id}/llm-cancel")
     def item_llm_cancel(request: Request, item_id: int):
