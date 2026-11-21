@@ -121,13 +121,14 @@ class Conversation:
     chunks: int = 0
     started: float = field(default_factory=time.time)
     finished: float | None = None
-    status: str = "running"          # running | ok | error | cancelled
+    status: str = "queued"           # queued | running | ok | error | cancelled
     error: str = ""
     usage: dict = field(default_factory=dict)
     cancel: threading.Event = field(default_factory=threading.Event, repr=False)
+    done: threading.Event = field(default_factory=threading.Event, repr=False)
 
     def as_dict(self) -> dict:
-        return {f.name: getattr(self, f.name) for f in fields(self) if f.name != "cancel"}
+        return {f.name: getattr(self, f.name) for f in fields(self) if f.name not in ("cancel", "done")}
 
 
 def ask(s: dict, prompt: str, conv: Conversation | None = None) -> dict:

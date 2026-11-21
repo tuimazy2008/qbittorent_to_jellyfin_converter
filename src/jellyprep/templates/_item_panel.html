@@ -42,7 +42,8 @@
 {% for c in convs %}
 <details class="conv"{% if loop.first %} open{% endif %}>
   <summary>🤖 <b>{{ c.model or "модель" }}</b> ·
-    {% if c.live %}<span class="warn">думает {{ ((now - c.started) if now else 0)|mmss }}</span>
+    {% if c.live and c.status == "queued" %}<span class="warn">в очереди к модели</span>
+    {% elif c.live %}<span class="warn">думает {{ ((now - c.started) if now else 0)|mmss }}</span>
     {% elif c.status == "ok" %}<span class="ok">ответила</span>
     {% elif c.status == "cancelled" %}<span class="muted">отменено</span>
     {% else %}<span class="bad">ошибка</span>{% endif %}

@@ -23,6 +23,7 @@ log = logging.getLogger("jellyprep")
 
 KIND_HINT = {"movies": "movie", "tv": "tv", "auto": "auto"}
 LLM_THINKING = "модель думает…"
+LLM_QUEUED = "в очереди к модели"
 INFO_PROBLEMS = ("Серии сопоставлены по названиям", "Сквозная нумерация")
 
 
@@ -137,7 +138,11 @@ class Worker:
                              "job_started": None}
         self._downloads: tuple[float, list[dict]] = (0.0, [])
         self._llm_lock = threading.Lock()
-        self.llm_jobs: dict[int, llm.Conversation] = {}   # running conversations, for the board and cancel
+        # queued and running conversations (insertion order = queue order); one request to the model at a time
+        self.llm_jobs: dict[int, llm.Conversation] = {}
+        self._llm_queue: list[tuple[int, bool]] = []
+        self._llm_cv = threading.Condition(self._llm_lock)
+        self._llm_thread: threading.Thread | None = None
 
     # --- threads ----------------------------------------------------------
     def start(self) -> None:
@@ -151,7 +156,7 @@ class Worker:
 
     def recover(self) -> None:
         """After a restart, jobs that were running go back to the queue; half-written files are removed."""
-        for item in self.db.query("SELECT id FROM items WHERE note=?", (LLM_THINKING,)):
+        for item in self.db.query("SELECT id FROM items WHERE note IN (?, ?)", (LLM_THINKING, LLM_QUEUED)):
             self.db.execute("UPDATE items SET note=? WHERE id=?",
                             ("модель: запрос прерван перезапуском сервиса", item["id"]))
         for item in self.db.items(RUNNING):
@@ -329,23 +334,67 @@ class Worker:
         self.trigger()
 
     def ask_llm(self, item_id: int, auto: bool = False, wait: bool = False) -> None:
-        """Ask the local model to identify the item (in the background). Its answer waits for confirmation."""
+        """Put the item into the model queue. One request runs at a time; the answer waits for confirmation."""
         s = config.load(self.db)
-        with self._llm_lock:
+        with self._llm_cv:
             if item_id in self.llm_jobs:
-                return
-            self.llm_jobs[item_id] = llm.Conversation(model=s.get("llm_model") or "", prompt="")
-        self.db.execute("UPDATE items SET note=? WHERE id=?", (LLM_THINKING, item_id))
-        t = threading.Thread(target=self._ask_llm, args=(item_id, auto), daemon=True, name=f"llm-{item_id}")
-        t.start()
+                conv = self.llm_jobs[item_id]
+            else:
+                conv = llm.Conversation(model=s.get("llm_model") or "", prompt="")
+                self.llm_jobs[item_id] = conv
+                self._llm_queue.append((item_id, auto))
+                self.db.execute("UPDATE items SET note=? WHERE id=?", (LLM_QUEUED, item_id))
+                if self._llm_thread is None or not self._llm_thread.is_alive():
+                    self._llm_thread = threading.Thread(target=self._llm_loop, daemon=True, name="llm")
+                    self._llm_thread.start()
+                self._llm_cv.notify()
         if wait:
-            t.join()
+            conv.done.wait()
+
+    def llm_queue_position(self, item_id: int) -> int | None:
+        """How many requests are ahead (0 = next), None if not queued."""
+        with self._llm_lock:
+            ids = [i for i, _ in self._llm_queue]
+            if item_id not in ids:
+                return None
+            running = any(c.status == "running" for c in self.llm_jobs.values())
+            return ids.index(item_id) + (1 if running else 0)
+
+    def _llm_loop(self) -> None:
+        while True:
+            with self._llm_cv:
+                while not self._llm_queue:
+                    self._llm_cv.wait()
+                item_id, auto = self._llm_queue.pop(0)
+                conv = self.llm_jobs.get(item_id)
+            if conv is None:
+                continue
+            conv.status, conv.started = "running", time.time()
+            self.db.execute("UPDATE items SET note=? WHERE id=?", (LLM_THINKING, item_id))
+            try:
+                self._ask_llm(item_id, auto)
+            except Exception as e:  # noqa: BLE001 — the queue must keep going
+                self.db.log(f"Модель: {e}", "error", item_id)
+                with self._llm_lock:
+                    self.llm_jobs.pop(item_id, None)
+            finally:
+                conv.done.set()
 
     def cancel_llm(self, item_id: int) -> None:
-        conv = self.llm_jobs.get(item_id)
-        if conv:
+        with self._llm_lock:
+            conv = self.llm_jobs.get(item_id)
+            queued = [q for q in self._llm_queue if q[0] == item_id]
+            if conv and queued:                       # not started yet: just take it out of the queue
+                self._llm_queue.remove(queued[0])
+                self.llm_jobs.pop(item_id, None)
+        if conv and queued:
+            conv.status = "cancelled"
+            conv.done.set()
+            self.db.execute("UPDATE items SET note=NULL WHERE id=?", (item_id,))
+            self.db.log("Убрано из очереди к модели", item_id=item_id)
+        elif conv:
             conv.cancel.set()
-        elif (self.db.item(item_id) or {}).get("note") == LLM_THINKING:   # stale label
+        elif (self.db.item(item_id) or {}).get("note") in (LLM_THINKING, LLM_QUEUED):   # stale label
             self.db.execute("UPDATE items SET note=NULL WHERE id=?", (item_id,))
 
     def _save_conversation(self, item_id: int, conv: llm.Conversation) -> None:

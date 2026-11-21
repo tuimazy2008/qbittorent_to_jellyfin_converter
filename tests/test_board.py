@@ -65,7 +65,7 @@ def test_download_row_and_grouping():
 
 def test_thinking_model_line_and_cancel():
     from jellyprep import llm
-    conv = llm.Conversation(model="google/gemma-4-12b-qat", prompt="p")
+    conv = llm.Conversation(model="google/gemma-4-12b-qat", prompt="p", status="running")
     conv.started -= 100
     conv.chunks = 1234
     it = item("review", note="модель думает…")
@@ -74,3 +74,14 @@ def test_thinking_model_line_and_cancel():
     assert any(a.get("post", "").endswith("/llm-cancel") and a["label"] == "Отменить" for a in r["actions"])
     stale = board.item_row(it, {**S, "llm_kind": "openai", "llm_url": "u", "llm_model": "m"}, CAT, [], 0, None, None, None)
     assert any(a["label"] == "Сбросить" for a in stale["actions"])
+
+
+
+def test_queued_model_line():
+    from jellyprep import llm
+    conv = llm.Conversation(model="m", prompt="")
+    it = item("review", note="в очереди к модели")
+    s2 = {**S, "llm_kind": "openai", "llm_url": "u", "llm_model": "m"}
+    r = board.item_row(it, s2, CAT, [], 0, None, None, conv, {1: 2})
+    assert "в очереди к модели, впереди: 2" in r["line"]
+    assert any(a["label"] == "Убрать из очереди" for a in r["actions"])

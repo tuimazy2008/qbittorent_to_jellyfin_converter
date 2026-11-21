@@ -86,7 +86,7 @@ def create_app(db: DB | None = None, start_worker: bool = True) -> FastAPI:
         s = config.load(db)
         return board.build(db.items(), worker.downloads(), s, db.categories(), lambda i: db.logs(i, limit=50),
                            _queue_positions(db), worker.status.get("job"), worker.status.get("job_started"),
-                           worker.llm_jobs)
+                           worker.llm_jobs, {i: worker.llm_queue_position(i) for i in list(worker.llm_jobs)})
 
     @app.get("/items", response_class=HTMLResponse)
     def items(request: Request):

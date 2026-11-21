@@ -251,3 +251,42 @@ def test_model_may_leave_a_file_unmatched():
            "episodes": [{"file": FILES[0], "season": 8, "episode": 18}, {"file": FILES[1], "season": None, "episode": None}]}
     ov, comment = llm.to_overrides(ans, FILES, {4556})
     assert ov["episodes"] == {FILES[0]: [8, 18, None]} and "одной серией" in comment
+
+
+def test_model_requests_run_one_at_a_time(db, tmp_path, monkeypatch):
+    import threading
+    import time as _time
+    from jellyprep import config, worker as worker_mod
+    from conftest import make_file
+    config.save(db, {"llm_kind": "openai", "llm_url": "http://lm/v1", "llm_model": "m", "llm_auto": False})
+    db.upsert_category("tv", enabled=1, kind="tv")
+    ids = []
+    for n in range(3):
+        root = tmp_path / f"show{n}"
+        make_file(root / "a.avi")
+        ids.append(db.add_item(source="folder", name=f"show{n}", category="tv", content_path=str(root), state="review",
+                               ident={"kind": "tv", "show": {"candidates": []}, "episodes": []}))
+    running, peak, gate = [0], [0], threading.Event()
+
+    def slow_ask(s, prompt, conv=None):
+        running[0] += 1
+        peak[0] = max(peak[0], running[0])
+        gate.wait(2)
+        _time.sleep(0.05)
+        running[0] -= 1
+        raise llm.LLMError("тест")
+
+    monkeypatch.setattr(llm, "ask", slow_ask)
+    w = worker_mod.Worker(db)
+    for i in ids:
+        w.ask_llm(i)
+    _time.sleep(0.2)
+    assert db.item(ids[0])["note"] == worker_mod.LLM_THINKING
+    assert db.item(ids[2])["note"] == worker_mod.LLM_QUEUED
+    assert w.llm_queue_position(ids[1]) == 1 and w.llm_queue_position(ids[2]) == 2
+    w.cancel_llm(ids[2])                                    # take the last one out of the queue
+    assert ids[2] not in w.llm_jobs and db.item(ids[2])["note"] is None
+    gate.set()
+    w.llm_jobs.get(ids[1]) and w.llm_jobs[ids[1]].done.wait(5)
+    assert peak[0] == 1                                     # never two requests at once
+    assert not w.llm_jobs
