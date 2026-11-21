@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -144,6 +144,15 @@ def create_app(db: DB | None = None, start_worker: bool = True) -> FastAPI:
     def item_ask_llm(request: Request, item_id: int):
         worker.ask_llm(item_id)
         return back_item(request, item_id)
+
+    @app.get("/items/{item_id}/frames/{name}")
+    def item_frame(item_id: int, name: str):
+        if not re.fullmatch(r"f_\d{6}\.jpg", name):
+            return JSONResponse({"error": "bad name"}, status_code=400)
+        path = worker_mod.FRAMES_DIR / str(item_id) / name
+        if not path.is_file():
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return FileResponse(path, media_type="image/jpeg")
 
     @app.post("/items/{item_id}/llm-cancel")
     def item_llm_cancel(request: Request, item_id: int):

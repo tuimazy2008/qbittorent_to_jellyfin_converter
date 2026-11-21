@@ -55,6 +55,11 @@
     <form method="post" action="/items/{{ item.id }}/llm-cancel" style="display:inline"><button class="small secondary">Отменить</button></form></p>
   {% endif %}
   {% if c.error %}<p class="bad">{{ c.error }}</p>{% endif %}
+  {% if c.images %}
+  <details{% if not c.live %} open{% endif %}><summary>Что показали ({{ c.images|length }} кадров)</summary>
+    <div class="frames">{% for f in c.images %}<a href="/items/{{ item.id }}/frames/{{ f }}" target="_blank" rel="noopener"><img src="/items/{{ item.id }}/frames/{{ f }}" alt="кадр {{ f }}" loading="lazy"></a>{% endfor %}</div>
+    <p class="muted small">Кадры из начала (заставка), середины и финальных титров главного файла.</p></details>
+  {% endif %}
   <details><summary>Что спросили</summary>
     <p class="muted">Инструкция (одна для всех задач):</p><pre class="conv-pre">{{ c.system }}</pre>
     <p class="muted">Данные по этой задаче:</p><pre class="conv-pre">{{ c.prompt or "(ещё готовится)" }}</pre></details>

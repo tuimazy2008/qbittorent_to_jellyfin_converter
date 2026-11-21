@@ -40,6 +40,12 @@ class FakeTMDB:
     def season_sizes(self, tmdb_id):
         return self.seasons.get(tmdb_id, {})
 
+    def movie_card(self, tmdb_id):
+        c = self.candidate("movie", tmdb_id)
+        return {"id": c.id, "title": c.title, "original_title": c.original_title, "year": c.year, "runtime": 100,
+                "directors": [], "cast": [], "companies": ["Мосфильм"] if c.id == 79580 else [], "countries": [],
+                "overview": ""}
+
     episodes = {(12345, 1): ["Мягкая лапа смерти. Часть 1", "Мягкая лапа смерти. Часть 2",
                              "Гроб на две персоны. Часть 1", "Гроб на две персоны. Часть 2"],
                 (12345, 2): ["Заказчик. Часть 1", "Заказчик. Часть 2", "Падение", "Марионетки"]}
@@ -97,3 +103,16 @@ def fake_info(width=1920, height=1080, codec="h264", mbps=8.0, hdr=False, audio=
                        "default": i == 0, "bps": 448_000} for i, (lang, ch) in enumerate(audio)],
             "subs": [{"index": 10 + i, "codec": "subrip", "lang": lang, "title": "", "forced": False}
                      for i, lang in enumerate(subs)]}
+
+
+from jellyprep import llm as _llm  # noqa: E402
+
+REAL_DETECT_VISION = _llm._detect_vision
+
+
+@pytest.fixture(autouse=True)
+def _no_vision_probe(monkeypatch):
+    """Tests never ask a real model server whether it can see images."""
+    from jellyprep import llm
+    monkeypatch.setattr(llm, "_detect_vision", lambda kind, url, model: False)
+    llm._VISION.clear()

@@ -120,7 +120,7 @@ def test_worker_applies_model_answer_for_review(tmp_path, db, tmdb, monkeypatch)
     b = make_file(root / "b.avi")
     monkeypatch.setattr(worker_mod, "tmdb_client", lambda s: tmdb)
     monkeypatch.setattr(worker_mod, "safe_probe", lambda p: None)
-    def fake_ask(s, prompt, conv=None):
+    def fake_ask(s, prompt, conv=None, images=None):
         conv.reasoning, conv.status = "подумала", "ok"
         return {
         "kind": "tv", "tmdb_id": None, "title": "Разделение", "year": 2022, "comment": "угадала",
@@ -191,7 +191,7 @@ def _title_matched_item(db, tmp_path, monkeypatch, tmdb, approval="auto_if_confi
 
 
 def _model_says(monkeypatch, mapping, tmdb_id=12345):
-    def fake_ask(s, prompt, conv=None):
+    def fake_ask(s, prompt, conv=None, images=None):
         conv.status = "ok"
         return {"kind": "tv", "tmdb_id": tmdb_id, "title": "Тайны следствия", "year": 2000, "comment": "по названиям",
                 "episodes": [{"file": f, "season": se, "episode": ep} for f, (se, ep) in mapping.items()]}
@@ -268,7 +268,7 @@ def test_model_requests_run_one_at_a_time(db, tmp_path, monkeypatch):
                                ident={"kind": "tv", "show": {"candidates": []}, "episodes": []}))
     running, peak, gate = [0], [0], threading.Event()
 
-    def slow_ask(s, prompt, conv=None):
+    def slow_ask(s, prompt, conv=None, images=None):
         running[0] += 1
         peak[0] = max(peak[0], running[0])
         gate.wait(2)

@@ -107,6 +107,24 @@ def guess_title(name: str) -> tuple[str, int | None, list[str]]:
 TRAILING_YEAR = re.compile(r"(?<=\S)[ ._(]+((?:19|20)\d\d)\)?$")
 
 
+HINT_JUNK = re.compile(r"(?i)rip|films?\.ws|\bhq\b|rutracker|kinozal|torrent|www\.|\.(ws|ru|org|com|net)\b|=-|-=|"
+                       r"\bby\b|релиз|release")
+
+
+def hints_from_info(info: dict | None) -> list[str]:
+    """Titles written inside the file (container title, video track title) that look like a real name."""
+    out = []
+    for raw in ((info or {}).get("title") or "", ((info or {}).get("video") or {}).get("title") or ""):
+        raw = raw.strip()
+        if not raw:
+            continue
+        title = guess_title(raw)[0]
+        if len(re.sub(r"[\W\d_]", "", title)) < 4 or HINT_JUNK.search(raw.split(".")[0] if "." in raw else raw):
+            continue
+        out.append(raw)
+    return out
+
+
 def guess_kind(name: str) -> str:
     return "tv" if guessit(name).get("type") == "episode" else "movie"
 

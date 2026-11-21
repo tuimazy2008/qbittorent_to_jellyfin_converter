@@ -14,8 +14,9 @@ import threading
 import time
 import traceback
 from pathlib import Path, PurePath
+from typing import Any
 
-from . import config, executor, identify, llm, media, planner, transcode
+from . import config, executor, identify, llm, media, parse, planner, transcode
 from .clients import QBit, TMDB, ClientError, Jellyfin, is_complete
 from .db import APPROVED, DB, DONE, ERROR, NEW, REMOVED, REVIEW, RUNNING, SKIPPED
 
@@ -24,7 +25,8 @@ log = logging.getLogger("jellyprep")
 KIND_HINT = {"movies": "movie", "tv": "tv", "auto": "auto"}
 LLM_THINKING = "модель думает…"
 LLM_QUEUED = "в очереди к модели"
-INFO_PROBLEMS = ("Серии сопоставлены по названиям", "Сквозная нумерация")
+FRAMES_DIR = config.CONFIG_DIR / "frames"
+INFO_PROBLEMS = ("Серии сопоставлены по названиям", "Сквозная нумерация", "Нет года в имени")
 
 
 def map_path(path: str, path_map: list[dict]) -> str:
@@ -239,6 +241,26 @@ class Worker:
             return True
         return False
 
+    def probe_cached(self, path: Path) -> dict | None:
+        """ffprobe summary, cached per file (path + size + mtime)."""
+        try:
+            st = path.stat()
+        except OSError:
+            return None
+        cached = self.db.probe_get(str(path), st.st_size, st.st_mtime)
+        if cached is not False:
+            return cached
+        info = safe_probe(str(path))
+        self.db.probe_set(str(path), st.st_size, st.st_mtime, info)
+        return info
+
+    def media_hints(self, sc: media.Scan) -> list[str]:
+        """Names written inside the main video file (tags), for releases with useless file names."""
+        if not sc.videos:
+            return []
+        main = max(sc.videos, key=lambda v: sc.sizes.get(v, 0))
+        return parse.hints_from_info(self.probe_cached(sc.base / main))
+
     def downloads(self) -> list[dict]:
         """Torrents still downloading in enabled categories (cached for a few seconds)."""
         ts, cached = self._downloads
@@ -282,7 +304,8 @@ class Worker:
             overrides = (item.get("ident") or {}).get("overrides") or {}
         try:
             sc = media.scan(item["content_path"])
-            ident = identify.identify(sc, KIND_HINT.get(cat["kind"], "auto"), tmdb_client(s), overrides)
+            ident = identify.identify(sc, KIND_HINT.get(cat["kind"], "auto"), tmdb_client(s), overrides,
+                                      hints=self.media_hints(sc))
             ident["overrides"] = overrides
             plan = planner.build(ident, sc, dest_root(s, cat), s, probe=safe_probe)
         except Exception as e:
@@ -380,6 +403,96 @@ class Worker:
             finally:
                 conv.done.set()
 
+    def _frames_for(self, item_id: int, ident: dict, sc: media.Scan, s: dict, conv: llm.Conversation) -> list[bytes]:
+        """Frames of the main video for a film (or a show nobody could name), when the model can see images."""
+        named_show = ident.get("kind") == "tv" and ((ident.get("show") or {}).get("chosen") or {}).get("id")
+        if named_show or not sc.videos or not llm.supports_vision(s):
+            return []
+        main = max(sc.videos, key=lambda v: sc.sizes.get(v, 0))
+        info = self.probe_cached(sc.base / main) or {}
+        frames = media.extract_frames(sc.base / main, info.get("duration") or 0, FRAMES_DIR / str(item_id))
+        conv.images = [f.name for f in frames]
+        conv.prompt += llm.FRAMES_NOTE + f"\n({len(frames)} frames of «{PurePath(main).name}» attached.)"
+        return [f.read_bytes() for f in frames]
+
+    def _movie_by_frames(self, item_id: int, item: dict, sc: media.Scan, s: dict, tmdb: TMDB | None,
+                         conv: llm.Conversation) -> tuple[dict, str]:
+        """Two steps, so the model isn't anchored on candidates found from a useless file name:
+        A) it reads the frames (title card, credits) without any list;
+        B) what it read is looked up in TMDB, and it picks among the films by their cards (director, cast,
+           studios, runtime). The result waits for confirmation like any model answer.
+        """
+        main = max(sc.videos, key=lambda v: sc.sizes.get(v, 0))
+        info = self.probe_cached(sc.base / main) or {}
+        duration = info.get("duration") or 0
+        frames = media.extract_frames(sc.base / main, duration, FRAMES_DIR / str(item_id))
+        if not frames:
+            raise llm.LLMError("не удалось вырезать кадры из файла")
+        conv.images = [f.name for f in frames]
+        conv.prompt = (f"File «{PurePath(main).name}», {int(duration // 60)} min. "
+                       f"{len(frames)} frames attached: opening, middle, end credits.")
+        seen = llm.ask(s, conv.prompt, conv, images=[f.read_bytes() for f in frames],
+                       schema=llm.VISION_SCHEMA, system=llm.VISION_SYSTEM)
+        self._save_conversation(item_id, conv)
+        names = [n for n in dict.fromkeys([seen.get("title"), seen.get("original_title")]) if n and n.strip()]
+        year = seen.get("year") if isinstance(seen.get("year"), int) else None
+        read = f"на экране: {seen.get('comment') or ', '.join(names)}"
+        if not names:
+            raise llm.LLMError("модель не смогла прочитать название на кадрах: " + (seen.get("comment") or ""))
+        found: dict[int, Any] = {}
+        if tmdb is not None:
+            for n in names:
+                for c in tmdb.search("movie", n, year) + tmdb.search("movie", n):
+                    found.setdefault(c.id, c)
+        ranked = sorted(found.values(), key=lambda c: identify.score(names, year, c), reverse=True)
+        ranked = [c for c in ranked if identify.score(names, year, c) >= 0.6][:6]
+        overrides = {"kind": "movie", "hints": names}
+        manual = {"title": names[0], "year": year}
+        if not ranked:
+            overrides["movies"] = {"0": manual}
+            return overrides, f"{read}; в TMDB такого не нашлось"
+        best = identify.score(names, year, ranked[0])
+        second = identify.score(names, year, ranked[1]) if len(ranked) > 1 else 0
+        if len(ranked) == 1 or (year and best >= 0.95 and second < best - 0.1):
+            overrides["movies"] = {"0": {"tmdb_id": ranked[0].id}}
+            return overrides, f"{read}; в TMDB это «{ranked[0].title}» ({ranked[0].year})"
+        cards = [tmdb.movie_card(c.id) for c in ranked]
+        step2 = llm.Conversation(model=s["llm_model"], prompt=llm.build_choose_prompt(
+            PurePath(main).name, duration, seen, cards), status="running")
+        with self._llm_lock:
+            self.llm_jobs[item_id] = step2
+        pick = llm.ask(s, step2.prompt, step2, schema=llm.CHOOSE_SCHEMA, system=llm.CHOOSE_SYSTEM)
+        tid = pick.get("tmdb_id")
+        overrides["movies"] = {"0": {"tmdb_id": tid} if tid in {c["id"] for c in cards} else manual}
+        return overrides, f"{read}; {pick.get('comment') or ''}".strip("; ")
+
+    @staticmethod
+    def _resolve_movie_title(overrides: dict, answer: dict, tmdb: TMDB | None) -> None:
+        """The model read a title (e.g. from the credits) that wasn't among the candidates: look it up in TMDB.
+
+        One clear match → that TMDB id. Several → keep the title and offer them as candidates to choose from.
+        """
+        choice = (overrides.get("movies") or {}).get("0") or {}
+        if tmdb is None or "tmdb_id" in choice or not answer.get("title"):
+            return
+        names = [n for n in dict.fromkeys([answer.get("title"), answer.get("original_title")]) if n]
+        overrides["hints"] = names
+        year = answer.get("year") if isinstance(answer.get("year"), int) else None
+        found: dict[int, Any] = {}
+        for n in names:
+            try:
+                for c in tmdb.search("movie", n, year) + tmdb.search("movie", n):
+                    found.setdefault(c.id, c)
+            except ClientError:
+                return
+        ranked = sorted(found.values(), key=lambda c: identify.score(names, year, c), reverse=True)
+        overrides.setdefault("movies", {})
+        if ranked:
+            best = identify.score(names, year, ranked[0])
+            second = identify.score(names, year, ranked[1]) if len(ranked) > 1 else 0
+            if best >= 0.9 and second < best - 0.1:
+                overrides["movies"]["0"] = {"tmdb_id": ranked[0].id}
+
     def cancel_llm(self, item_id: int) -> None:
         with self._llm_lock:
             conv = self.llm_jobs.get(item_id)
@@ -420,10 +533,18 @@ class Worker:
             conv.prompt = llm.build_prompt(item["name"], sc.videos, ident.get("kind", ""), cands, titles)
             conv.model = s["llm_model"]
             started = time.time()
-            answer = llm.ask(s, conv.prompt, conv)
-            overrides, comment = llm.to_overrides(answer, sc.videos, {c["id"] for c in cands})
+            if ident.get("kind") == "movie" and len(ident.get("movies") or []) == 1 and llm.supports_vision(s):
+                overrides, comment = self._movie_by_frames(item_id, item, sc, s, tmdb, conv)
+                conv = self.llm_jobs.get(item_id, conv)
+            else:
+                images = self._frames_for(item_id, ident, sc, s, conv)
+                answer = llm.ask(s, conv.prompt, conv, images=images)
+                overrides, comment = llm.to_overrides(answer, sc.videos, {c["id"] for c in cands})
+                if overrides.get("kind") == "movie":
+                    self._resolve_movie_title(overrides, answer, tmdb)
         except (llm.LLMError, OSError) as e:
             offline = "недоступна" in str(e)
+            conv = self.llm_jobs.get(item_id, conv)
             if conv.status == "running":
                 conv.status, conv.error, conv.finished = "error", str(e), time.time()
             self._save_conversation(item_id, conv)

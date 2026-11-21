@@ -13,6 +13,7 @@ from .clients import TMDB, Candidate, ClientError
 from .media import Scan
 
 NO_TMDB_CONFIDENCE = 0.5
+NO_YEAR_PROBLEM = "Нет года в имени, а в TMDB несколько похожих — проверьте"
 
 
 def score(query_titles: list[str], year: int | None, c: Candidate) -> float:
@@ -45,6 +46,7 @@ def match(tmdb: TMDB | None, kind: str, queries: list[str], year: int | None) ->
             s -= 0.15  # ambiguous: two candidates look the same
         if year is None and len(ranked) > 1:
             s = min(s, 0.75)  # "Radar" with no year matches many shows exactly: always confirm
+            result["no_year_ambiguous"] = True
         result["chosen"], result["score"] = top, round(max(0.0, s), 3)
     return result
 
@@ -87,13 +89,18 @@ def _safe_choice(entry: dict, tmdb: TMDB | None, kind: str, choice: dict | None,
         problems.append(f"Не удалось взять TMDB {choice}: {e}")
 
 
-def identify(s: Scan, kind_hint: str, tmdb: TMDB | None, overrides: dict | None = None) -> dict:
+def identify(s: Scan, kind_hint: str, tmdb: TMDB | None, overrides: dict | None = None,
+             hints: list[str] | None = None) -> dict:
+    """hints: names found inside the file (tags) or given by the model; used as extra TMDB queries."""
     overrides = overrides or {}
+    hints = [h for h in [*(hints or []), *(overrides.get("hints") or [])] if h]
     kind = overrides.get("kind") or kind_hint
     if kind not in ("movie", "tv"):
         kind = _detect_kind(s)
-    ident = identify_tv(s, tmdb, overrides) if kind == "tv" else identify_movies(s, tmdb, overrides)
+    ident = identify_tv(s, tmdb, overrides, hints) if kind == "tv" else identify_movies(s, tmdb, overrides, hints)
     ident["kind"] = kind
+    if hints:
+        ident["hints"] = hints
     return ident
 
 
@@ -108,7 +115,7 @@ def _detect_kind(s: Scan) -> str:
 
 
 # --- movies --------------------------------------------------------------
-def identify_movies(s: Scan, tmdb: TMDB | None, overrides: dict) -> dict:
+def identify_movies(s: Scan, tmdb: TMDB | None, overrides: dict, hints: list[str] | None = None) -> dict:
     problems: list[str] = []
     groups: dict[tuple, list[str]] = defaultdict(list)
     single = len(s.videos) == 1
@@ -127,12 +134,18 @@ def identify_movies(s: Scan, tmdb: TMDB | None, overrides: dict) -> dict:
             t2, y2, alts2 = parse.guess_title(s.name)
             queries += [t2, *alts2]
             year = year or y2
+            for h in hints or []:                       # "The.Time.Machine.2002…" written in the file's tags
+                t3, y3, _ = parse.guess_title(h)
+                queries.append(t3)
+                year = year or y3
         queries = [q for q in dict.fromkeys(queries) if q]
         entry = {"files": files, "guess": {"title": title, "year": year}, **_safe_match(tmdb, "movie", queries, year, problems)}
         choice = (overrides.get("movies") or {}).get(str(idx)) or _id_in_name(f"{s.name}/{files[0]}")
         _safe_choice(entry, tmdb, "movie", choice, problems)
         if entry["chosen"] is None and tmdb is None and title:
             entry["chosen"], entry["score"] = _manual(title, year), NO_TMDB_CONFIDENCE
+        if entry.get("no_year_ambiguous") and not entry.get("manual"):
+            problems.append(f"{NO_YEAR_PROBLEM}: {', '.join(entry['files'][:2])}")
         movies.append(entry)
     if not s.videos:
         problems.append("Видеофайлы не найдены")
@@ -143,7 +156,7 @@ def identify_movies(s: Scan, tmdb: TMDB | None, overrides: dict) -> dict:
 
 
 # --- TV ------------------------------------------------------------------
-def identify_tv(s: Scan, tmdb: TMDB | None, overrides: dict) -> dict:
+def identify_tv(s: Scan, tmdb: TMDB | None, overrides: dict, hints: list[str] | None = None) -> dict:
     problems: list[str] = []
     title, year, alts = parse.guess_title(s.name)
     root_season = parse.season_from_name(s.name)
@@ -178,11 +191,13 @@ def identify_tv(s: Scan, tmdb: TMDB | None, overrides: dict) -> dict:
         episodes.append({"file": v, "season": season, "episode": ep, "how": how})
 
     base_title = re.sub(r"[\s.:-]*\d+(?:\.\d+)?$", "", title).strip()   # "Пин-код 2" → also "Пин-код"
-    queries = [q for q in dict.fromkeys([title, *alts, base_title]) if q]
+    queries = [q for q in dict.fromkeys([title, *alts, base_title, *(parse.guess_title(h)[0] for h in hints or [])]) if q]
     show = {"guess": {"title": title, "year": year}, **_safe_match(tmdb, "tv", queries, year, problems)}
     _safe_choice(show, tmdb, "tv", overrides.get("show") or _id_in_name(s.name), problems)
     if show["chosen"] is None and tmdb is None and title:
         show["chosen"], show["score"] = _manual(title, year), NO_TMDB_CONFIDENCE
+    if show.get("no_year_ambiguous") and not show.get("manual"):
+        problems.append(NO_YEAR_PROBLEM)
     conf = show["score"]
 
     chosen0 = show.get("chosen") or {}

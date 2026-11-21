@@ -6,6 +6,7 @@ so it always ends up waiting for confirmation.
 """
 from __future__ import annotations
 
+import base64
 import json
 import re
 import threading
@@ -125,6 +126,7 @@ class Conversation:
     status: str = "queued"           # queued | running | ok | error | cancelled
     error: str = ""
     usage: dict = field(default_factory=dict)
+    images: list = field(default_factory=list)   # names of frames shown to the model
     cancel: threading.Event = field(default_factory=threading.Event, repr=False)
     done: threading.Event = field(default_factory=threading.Event, repr=False)
 
@@ -132,14 +134,101 @@ class Conversation:
         return {f.name: getattr(self, f.name) for f in fields(self) if f.name not in ("cancel", "done")}
 
 
-def ask(s: dict, prompt: str, conv: Conversation | None = None) -> dict:
+FRAMES_NOTE = """
+Frames from the main video file are attached (opening, middle, end credits). On-screen text — the title card,
+the credits, studio and fund logos — is the most reliable clue: read it carefully. Put the decisive text you read
+into "comment". If the title you read isn't among the candidates, give it with tmdb_id null (and the year only if
+you are sure)."""
+
+
+def supports_vision(s: dict) -> bool:
+    """Ask the model server whether the configured model accepts images (cached per model)."""
+    if s.get("llm_vision", "auto") == "off" or not configured(s):
+        return False
+    key = (s["llm_kind"], s["llm_url"], s["llm_model"])
+    if key not in _VISION:
+        _VISION[key] = _detect_vision(*key)
+    return _VISION[key]
+
+
+_VISION: dict[tuple, bool] = {}
+
+
+def _detect_vision(kind: str, url: str, model: str) -> bool:
+    url = url.rstrip("/")
+    try:
+        if kind == "ollama":
+            r = httpx.post(f"{url}/api/show", json={"model": model}, timeout=10)
+            return "vision" in (r.json().get("capabilities") or [])
+        root = url[:-3] if url.endswith("/v1") else url
+        r = httpx.get(f"{root}/api/v0/models/{model}", timeout=10)   # LM Studio's own API
+        return r.json().get("type") == "vlm"
+    except (httpx.HTTPError, ValueError):
+        return False
+
+
+VISION_SYSTEM = """You look at frames taken from one film (opening, middle, end credits) to tell which film it is.
+Read the on-screen text exactly: the title card, credits (names, roles), studio, fund and channel logos.
+Report what you READ, not what you guess. If the title isn't readable, leave "title" empty.
+Give the year only if you are sure. Put names, studios and other readable credits into "credits".
+"comment": one sentence in Russian on what you saw. Answer with JSON only."""
+
+VISION_SCHEMA = {
+    "type": "object",
+    "properties": {"title": {"type": "string"}, "original_title": {"type": "string"},
+                   "year": {"type": ["integer", "null"]}, "credits": {"type": "array", "items": {"type": "string"}},
+                   "comment": {"type": "string"}},
+    "required": ["title", "original_title", "year", "credits", "comment"],
+}
+
+CHOOSE_SYSTEM = """You pick which TMDB film a video file is, using what was read from its frames and the TMDB cards
+(year, runtime, director, producers, cast, studios, countries). Names and studios read in the credits are the
+strongest evidence: a producer or studio from the credits found in a card decides it. TMDB runtimes are often
+missing or wrong (especially for Russian films): never reject a card only because of the runtime.
+Credits read from frames may contain OCR mistakes in names. If none of the cards fits, answer tmdb_id null.
+"comment": one sentence in Russian explaining the choice. Answer with JSON only."""
+
+CHOOSE_SCHEMA = {
+    "type": "object",
+    "properties": {"tmdb_id": {"type": ["integer", "null"]}, "comment": {"type": "string"}},
+    "required": ["tmdb_id", "comment"],
+}
+
+
+def build_choose_prompt(file_name: str, duration: float, seen: dict, cards: list[dict]) -> str:
+    lines = [f"File: {file_name}, duration {int(duration // 60)} min.",
+             f"Read from the frames: title «{seen.get('title') or '?'}» / «{seen.get('original_title') or '?'}»,"
+             f" year {seen.get('year') or '?'}.",
+             "Credits read: " + ("; ".join(seen.get("credits") or []) or "—"), "", "TMDB cards:"]
+    for c in cards:
+        lines.append(f"- id {c['id']}: {c['title']} / {c['original_title']} ({c['year'] or '?'}), "
+                     f"{c['runtime'] or '?'} min, director {', '.join(c['directors']) or '?'}, "
+                     f"producers {', '.join(c.get('producers') or []) or '?'}, "
+                     f"writers {', '.join(c.get('writers') or []) or '?'}, "
+                     f"cast {', '.join(c['cast']) or '?'}, studios {', '.join(c['companies']) or '?'}, "
+                     f"countries {', '.join(x for x in c['countries'] if x) or '?'}. {c['overview']}")
+    return "\n".join(lines)
+
+
+def ask(s: dict, prompt: str, conv: Conversation | None = None, images: list[bytes] | None = None,
+        schema: dict | None = None, system: str | None = None) -> dict:
     """Stream the answer (so it can be cancelled and its progress shown); return the parsed JSON."""
     kind, url, model = s["llm_kind"], s["llm_url"].rstrip("/"), s["llm_model"]
     conv = conv or Conversation(model=model, prompt=prompt)
-    messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}]
+    user: dict = {"role": "user", "content": prompt}
+    if images:
+        b64 = [base64.b64encode(i).decode() for i in images]
+        if kind == "ollama":
+            user["images"] = b64
+        else:
+            user["content"] = [{"type": "text", "text": prompt}] + [
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b}"}} for b in b64]
+    schema = schema or SCHEMA
+    conv.system = system or SYSTEM
+    messages = [{"role": "system", "content": conv.system}, user]
     try:
         if kind == "ollama":
-            req = {"url": f"{url}/api/chat", "json": {"model": model, "stream": True, "format": SCHEMA,
+            req = {"url": f"{url}/api/chat", "json": {"model": model, "stream": True, "format": schema,
                                                      "options": {"temperature": 0, "num_predict": MAX_TOKENS},
                                                      "messages": messages}}
             if s.get("llm_reasoning", "off") == "off":
@@ -151,7 +240,7 @@ def ask(s: dict, prompt: str, conv: Conversation | None = None) -> dict:
                    "json": {"model": model, "temperature": 0, "stream": True,
                             "stream_options": {"include_usage": True}, "max_tokens": MAX_TOKENS,
                             "response_format": {"type": "json_schema", "json_schema": {
-                                "name": "identification", "strict": True, "schema": SCHEMA}},
+                                "name": "identification", "strict": True, "schema": schema}},
                             "messages": messages}}
             if s.get("llm_reasoning", "off") == "off":
                 req["json"]["reasoning_effort"] = "none"   # LM Studio: no thinking phase

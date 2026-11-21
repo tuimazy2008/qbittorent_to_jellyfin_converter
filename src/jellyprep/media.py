@@ -71,6 +71,28 @@ def duration(path: str | Path) -> float:
     return float(ffprobe(path).get("format", {}).get("duration") or 0.0)
 
 
+def frame_times(duration: float) -> list[float]:
+    """Where to look: the opening (title card), the middle, the end credits."""
+    d = duration or 0
+    times = [20, 45, 75, 110, 150, d * 0.25, d * 0.5, d * 0.75, d - 420, d - 300, d - 200, d - 110, d - 40]
+    return sorted({round(t) for t in times if 0 < t < d - 5}) if d > 60 else [max(d / 2, 0)]
+
+
+def extract_frames(path: str | Path, duration: float, out_dir: str | Path, width: int = 768) -> list[Path]:
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    for old in out.glob("f_*.jpg"):
+        old.unlink()
+    frames = []
+    for t in frame_times(duration):
+        dst = out / f"f_{int(t):06d}.jpg"
+        r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", str(t), "-i", str(path), "-frames:v", "1",
+                            "-vf", f"scale={width}:-2", "-q:v", "4", str(dst)], capture_output=True, timeout=120)
+        if r.returncode == 0 and dst.exists() and dst.stat().st_size > 0:
+            frames.append(dst)
+    return frames
+
+
 def free_bytes(path: str | Path) -> int:
     p = Path(path)
     while not p.exists():

@@ -125,7 +125,7 @@ class Surveys:
         except Exception:  # noqa: BLE001
             info = None
         self.db.probe_set(str(path), st.st_size, st.st_mtime, info)
-        return info
+        return info   # (same cache as Worker.probe_cached)
 
 
 def is_video_library(lib: dict) -> bool:

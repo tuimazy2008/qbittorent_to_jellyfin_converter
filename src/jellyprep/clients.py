@@ -157,6 +157,21 @@ class TMDB:
         return Candidate(d["id"], d.get("name", ""), d.get("original_name", ""),
                          _year(d.get("first_air_date")), d.get("popularity", 0.0), d.get("overview", ""))
 
+    def movie_card(self, tmdb_id: int) -> dict:
+        """What the model needs to tell similar films apart: year, runtime, director, cast, studios."""
+        d = self._get(f"/movie/{tmdb_id}", language=self.language, append_to_response="credits")
+        crew = (d.get("credits") or {}).get("crew") or []
+        cast = (d.get("credits") or {}).get("cast") or []
+        return {"id": d["id"], "title": d.get("title", ""), "original_title": d.get("original_title", ""),
+                "year": _year(d.get("release_date")), "runtime": d.get("runtime") or None,
+                "directors": [c["name"] for c in crew if c.get("job") == "Director"][:2],
+                "producers": [c["name"] for c in crew if c.get("job") in ("Producer", "Executive Producer")][:4],
+                "writers": [c["name"] for c in crew if c.get("department") == "Writing"][:2],
+                "cast": [c["name"] for c in cast[:5]],
+                "companies": [c["name"] for c in d.get("production_companies") or []][:4],
+                "countries": [c.get("iso_3166_1") for c in d.get("production_countries") or []][:3],
+                "overview": (d.get("overview") or "")[:240]}
+
     def season_episodes(self, tmdb_id: int, season: int) -> list[dict]:
         """[{"episode": 1, "name": "Мягкая лапа смерти. Часть 1"}, ...]"""
         d = self._get(f"/tv/{tmdb_id}/season/{season}", language=self.language)

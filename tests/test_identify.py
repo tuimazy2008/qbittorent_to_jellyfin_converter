@@ -219,3 +219,11 @@ def test_unmatched_titles_drop_their_unreliable_numbers(tmp_path, tmdb):
     assert ident["unmatched"] == ["08 Энцелад.avi"]                 # its "08" would collide with «Силуэт на снегу»
     assert {e["file"]: e["episode"] for e in ident["episodes"]}["03 Силуэт на снегу.avi"] == 8
     assert not any("Повторяются" in p for p in ident["problems"])
+
+
+def test_no_year_and_several_movies_always_reviewed(tmp_path, tmdb):
+    from jellyprep.clients import Candidate
+    tmdb.movies += [Candidate(1401377, "Dom", "Dom", 2024, 1), Candidate(70813, "Dom", "Dom", 2003, 1)]
+    f = make_file(tmp_path / "dom.mkv")
+    ident = identify.identify(media.scan(f), "movie", tmdb)
+    assert any(p.startswith(identify.NO_YEAR_PROBLEM) for p in ident["problems"])

@@ -54,7 +54,8 @@ def summarize(probe: dict) -> dict:
     streams = probe.get("streams", [])
     duration = float(fmt.get("duration") or 0)
     size = int(fmt.get("size") or 0)
-    info: dict = {"duration": duration, "size": size, "video": None, "audio": [], "subs": []}
+    info: dict = {"duration": duration, "size": size, "video": None, "audio": [], "subs": [],
+                  "title": str((fmt.get("tags") or {}).get("title") or "")}
     for st in streams:
         tags = st.get("tags") or {}
         disp = st.get("disposition") or {}
@@ -66,6 +67,7 @@ def summarize(probe: dict) -> dict:
                 "pix_fmt": st.get("pix_fmt", ""), "bps": _bps(st),
                 "hdr": st.get("color_transfer") in ("smpte2084", "arib-std-b67"),
                 "interlaced": st.get("field_order") in ("tt", "bb", "tb", "bt"),
+                "title": str(tags.get("title") or ""),
             }
         elif kind == "audio":
             info["audio"].append({"index": st["index"], "codec": st.get("codec_name", ""),
