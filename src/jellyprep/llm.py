@@ -18,7 +18,7 @@ import httpx
 from .clients import TMDB, ClientError
 
 TIMEOUT = httpx.Timeout(300.0, connect=5.0)
-MAX_EPISODE_LINES = 400
+MAX_EPISODE_LINES = 700
 MAX_SECONDS = 20 * 60
 MAX_REASONING_CHARS = 40_000     # a model that thinks longer than this is going in circles
 MAX_TOKENS = 12_000
@@ -95,10 +95,11 @@ def episode_titles_for(tmdb: TMDB | None, candidates: list[dict], seasons_hint: 
             sizes = tmdb.season_sizes(c["id"])
         except ClientError:
             continue
-        wanted = sorted(n for n in sizes if n >= 1 and (not seasons_hint or n in seasons_hint)) or \
-            sorted(n for n in sizes if n >= 1)[:4]
+        regular = sorted(n for n in sizes if n >= 1 and sizes[n])
+        # the seasons the files seem to be in first, then the rest: the guess may be wrong
+        wanted = [n for n in regular if n in seasons_hint] + [n for n in regular if n not in seasons_hint]
         out[c["id"]] = {}
-        for n in wanted[:6]:
+        for n in wanted[:8]:
             try:
                 out[c["id"]][n] = tmdb.season_episodes(c["id"], n)
             except ClientError:
@@ -141,6 +142,8 @@ def ask(s: dict, prompt: str, conv: Conversation | None = None) -> dict:
             req = {"url": f"{url}/api/chat", "json": {"model": model, "stream": True, "format": SCHEMA,
                                                      "options": {"temperature": 0, "num_predict": MAX_TOKENS},
                                                      "messages": messages}}
+            if s.get("llm_reasoning", "off") == "off":
+                req["json"]["think"] = False
         else:
             base = url if url.endswith("/v1") else f"{url}/v1"
             req = {"url": f"{base}/chat/completions",
@@ -150,6 +153,8 @@ def ask(s: dict, prompt: str, conv: Conversation | None = None) -> dict:
                             "response_format": {"type": "json_schema", "json_schema": {
                                 "name": "identification", "strict": True, "schema": SCHEMA}},
                             "messages": messages}}
+            if s.get("llm_reasoning", "off") == "off":
+                req["json"]["reasoning_effort"] = "none"   # LM Studio: no thinking phase
         with httpx.stream("POST", timeout=TIMEOUT, **req) as r:
             r.raise_for_status()
             for line in r.iter_lines():
@@ -170,6 +175,13 @@ def ask(s: dict, prompt: str, conv: Conversation | None = None) -> dict:
     conv.finished = time.time()
     if not conv.reasoning and (m := re.search(r"<think>(.*?)</think>", conv.content, re.S)):
         conv.reasoning = m[1].strip()   # models that think inside the answer text
+    if not re.sub(r"<think>.*?</think>", "", conv.content, flags=re.S).strip():
+        used = (conv.usage or {}).get("completion_tokens") or 0
+        conv.status = "error"
+        conv.error = ("модель исчерпала лимит ответа на рассуждения и не успела ответить — выключите "
+                      "рассуждения модели в настройках или выберите другую модель"
+                      if conv.reasoning and used >= MAX_TOKENS * 0.95 else "модель вернула пустой ответ")
+        raise LLMError(conv.error)
     try:
         answer = parse_answer(conv.content)
     except LLMError as e:

@@ -290,3 +290,31 @@ def test_model_requests_run_one_at_a_time(db, tmp_path, monkeypatch):
     w.llm_jobs.get(ids[1]) and w.llm_jobs[ids[1]].done.wait(5)
     assert peak[0] == 1                                     # never two requests at once
     assert not w.llm_jobs
+
+
+def test_reasoning_off_by_default_and_exhausted_limit_message(monkeypatch):
+    sent = {}
+    lines = [sse(reasoning_content="думаю " * 10),
+             "data: " + json.dumps({"choices": [], "usage": {"completion_tokens": llm.MAX_TOKENS}})]
+
+    def stream(method, url, **kw):
+        sent.update(kw)
+        return FakeStream(lines, sent)
+
+    monkeypatch.setattr(llm.httpx, "stream", stream)
+    s = {"llm_kind": "openai", "llm_url": "http://lm", "llm_model": "m"}
+    with pytest.raises(llm.LLMError, match="исчерпала лимит"):
+        llm.ask(s, "p", llm.Conversation(model="m", prompt="p"))
+    assert sent["json"]["reasoning_effort"] == "none"
+    with pytest.raises(llm.LLMError):
+        llm.ask({**s, "llm_reasoning": "on"}, "p", llm.Conversation(model="m", prompt="p"))
+    assert "reasoning_effort" not in sent["json"]
+
+
+def test_episode_titles_include_all_seasons(tmdb):
+    from conftest import FakeTMDB
+    t = FakeTMDB()
+    t.seasons[1] = {1: 2, 2: 2, 3: 2}
+    t.episodes.update({(1, 1): ["a", "b"], (1, 2): ["c", "d"], (1, 3): ["e", "f"]})
+    out = llm.episode_titles_for(t, [{"id": 1}], {1})
+    assert list(out[1]) == [1, 2, 3]

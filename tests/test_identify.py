@@ -142,3 +142,80 @@ def test_episodes_matched_by_tmdb_titles(tmp_path, tmdb):
     plan = planner.build(ident, s, tmp_path / "lib", {})
     names = sorted(a["dst"].split("/")[-1] for a in plan["actions"])
     assert "Тайны следствия S02E01-E02.avi" in names and not plan["problems"]
+
+
+def _smeshariki(tmdb):
+    from jellyprep.clients import Candidate
+    tmdb.tv += [Candidate(74405, "Смешарики: Пин-код", "Смешарики: Пин-код", 2012, 5),
+                Candidate(107951, "Смешарики: Пин-код 2.0", "Смешарики: Пин-код 2.0", 2017, 1)]
+    tmdb.seasons.update({74405: {0: 1, 1: 8, 2: 3}, 107951: {1: 3}})
+    tmdb.episodes.update({
+        (74405, 1): ["Почему?", "Принцесса в поиске", "Наноняни", "Метатыква", "ДНК",
+                     "Отель «У весёлого альпиниста»", "Ураган на спор", "Силуэт на снегу"],
+        (74405, 2): ["Баранка", "Двигатель прогресса", "Лучший из миров"],
+        (107951, 1): ["Первая", "Вторая", "Третья"]})
+
+
+def test_tmdb_titles_beat_release_numbering(tmp_path, tmdb):
+    _smeshariki(tmdb)
+    root = tmp_path / "Смешарики Пин-код [rutracker.org]"
+    for name in ("01 Наноняни .avi", "02 Принцесса в поиске.avi", "03 Силуэт на снегу.avi",
+                 "05 Отель У весёлого альпениста.avi", "06 ДНК.avi"):
+        make_file(root / name)
+    ident = identify.identify(media.scan(root), "tv", tmdb, {"show": {"tmdb_id": 74405}})
+    got = {e["file"]: (e["season"], e["episode"]) for e in ident["episodes"]}
+    assert got["01 Наноняни .avi"] == (1, 3) and got["03 Силуэт на снегу.avi"] == (1, 8)
+    assert got["05 Отель У весёлого альпениста.avi"] == (1, 6) and got["06 ДНК.avi"] == (1, 5)
+    assert any("не по номерам в именах" in p for p in ident["problems"])
+
+
+def test_titles_find_the_right_show_and_season(tmp_path, tmdb):
+    _smeshariki(tmdb)
+    root = tmp_path / "Смешарики Пин-код 2.0"
+    for name in ("01 Баранка.mp4", "02 Двигатель прогресса.mp4", "03 Лучьший из миров.mp4"):
+        make_file(root / name)
+    ident = identify.identify(media.scan(root), "tv", tmdb)
+    assert ident["show"]["chosen"]["id"] == 74405
+    assert sorted((e["season"], e["episode"]) for e in ident["episodes"]) == [(2, 1), (2, 2), (2, 3)]
+    assert any("По названиям серий это сериал" in p or "не по номерам" in p for p in ident["problems"])
+
+
+def test_titles_switch_show_when_first_candidate_has_no_such_episodes(tmp_path, tmdb):
+    _smeshariki(tmdb)
+    root = tmp_path / "Смешарики Пин-код 2.0"
+    for name in ("01 Баранка.mp4", "02 Двигатель прогресса.mp4", "03 Лучьший из миров.mp4"):
+        make_file(root / name)
+    s = media.scan(root)
+    show = {"chosen": {"id": 107951, "title": "Смешарики: Пин-код 2.0", "year": 2017}, "score": 0.9,
+            "candidates": [{"id": 107951, "title": "Смешарики: Пин-код 2.0", "year": 2017},
+                           {"id": 74405, "title": "Смешарики: Пин-код", "year": 2012}]}
+    eps = [{"file": f, "season": 1, "episode": n + 1, "how": "guessit, сезон не найден → 1"} for n, f in enumerate(s.videos)]
+    matched, changed, switched = identify._match_episode_titles(eps, [], tmdb, show, set(), show_fixed=False)
+    assert switched["id"] == 74405 and show["chosen"]["id"] == 74405 and matched == 3
+    assert [(e["season"], e["episode"]) for e in eps] == [(2, 1), (2, 2), (2, 3)]
+
+
+def test_closest_title_wins_and_part_word_in_brackets(tmp_path, tmdb):
+    _smeshariki(tmdb)
+    tmdb.episodes[(74405, 1)] += ["Бортовой дневник", "Бортовой дневник 2", "День Биби. Часть 1", "День Биби. Часть 2"]
+    tmdb.seasons[74405][1] = 12
+    root = tmp_path / "Смешарики Пин-код"
+    for name in ("32 Бортовой дневник.avi", "44 Бортовой дневник 2.avi", "09 День Биби (часть 1).mp4",
+                 "16 День Биби (часть 2).mp4", "01 Наноняни .avi"):
+        make_file(root / name)
+    ident = identify.identify(media.scan(root), "tv", tmdb, {"show": {"tmdb_id": 74405}})
+    got = {e["file"]: (e["season"], e["episode"]) for e in ident["episodes"]}
+    assert got["32 Бортовой дневник.avi"] == (1, 9) and got["44 Бортовой дневник 2.avi"] == (1, 10)
+    assert got["09 День Биби (часть 1).mp4"] == (1, 11) and got["16 День Биби (часть 2).mp4"] == (1, 12)
+
+
+
+def test_unmatched_titles_drop_their_unreliable_numbers(tmp_path, tmdb):
+    _smeshariki(tmdb)
+    root = tmp_path / "Смешарики Пин-код"
+    for name in ("01 Наноняни .avi", "02 Принцесса в поиске.avi", "03 Силуэт на снегу.avi", "08 Энцелад.avi"):
+        make_file(root / name)
+    ident = identify.identify(media.scan(root), "tv", tmdb, {"show": {"tmdb_id": 74405}})
+    assert ident["unmatched"] == ["08 Энцелад.avi"]                 # its "08" would collide with «Силуэт на снегу»
+    assert {e["file"]: e["episode"] for e in ident["episodes"]}["03 Силуэт на снегу.avi"] == 8
+    assert not any("Повторяются" in p for p in ident["problems"])

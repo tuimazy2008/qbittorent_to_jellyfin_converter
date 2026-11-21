@@ -27,7 +27,8 @@ DEFAULTS: dict[str, Any] = {
     "llm_model": "",
     "llm_key": "",
     "llm_auto": True,            # ask the model by itself when the rules can't identify something
-    "llm_confirm_auto": True,    # rules sure + model gives the same answer → continue without asking
+    "llm_confirm_auto": True,
+    "llm_reasoning": "off",      # off | on — "thinking" models (gemma 4, qwen 3) go in circles on long lists    # rules sure + model gives the same answer → continue without asking
     # Optional Jellyfin
     "jellyfin_url": "",
     "jellyfin_key": "",
