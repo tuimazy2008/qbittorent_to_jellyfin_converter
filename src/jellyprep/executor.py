@@ -5,6 +5,7 @@ import errno
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -57,18 +58,32 @@ def execute(plan: dict, link_fallback: str = "copy", log: Callable[[str], None] 
             continue
         dst.parent.mkdir(parents=True, exist_ok=True)
         extra = {}
+        started = time.time()
         if a["action"] == "hardlink":
             method = _link(src, dst, link_fallback)
         elif a["action"] == "remux":
             _remux(src, dst)
             method = "remux"
+        elif a["action"] in ("transcode", "process") and a.get("inplace") and _already_done(src, settings or {}):
+            # re-run after a restart: this file was finished last time
+            done.append({**_slim(a), "method": "exists", "out_size": src.stat().st_size, "seconds": 0})
+            continue
         elif a["action"] in ("transcode", "process"):
             n = heavy.index(a) + 1
             cb = (lambda f, sp, n=n, name=src.name: progress(n, len(heavy), name, f, sp)) if progress else None
             if progress:
                 progress(n, len(heavy), src.name, 0.0, "")
-            extra = transcode.process(str(src), str(dst), a["info"], settings or {},
-                                      transcode=a["action"] == "transcode", progress=cb)
+            try:
+                extra = transcode.process(str(src), str(dst), a["info"], settings or {},
+                                          transcode=a["action"] == "transcode", progress=cb)
+            except transcode.FFmpegError as e:
+                if not a.get("inplace"):
+                    raise  # a torrent's library copy must be complete before the torrent can go
+                # re-processing in place: the original is untouched, carry on with the other files
+                log(f"Не обработан, оставлен как был: {src.name}: {e}")
+                done.append({**_slim(a), "method": "failed", "error": str(e)[:300],
+                             "out_size": src.stat().st_size, "seconds": round(time.time() - started)})
+                continue
             method = a["action"]
         else:
             raise ValueError(f"unknown action {a['action']}")
@@ -76,8 +91,20 @@ def execute(plan: dict, link_fallback: str = "copy", log: Callable[[str], None] 
         if extra:
             msg += f" ({extra['size'] / GB:.2f} ГБ из {a['size'] / GB:.2f} ГБ, {extra['seconds'] // 60} мин)"
         log(msg)
-        done.append({**_slim(a), "method": method, **({"out_size": extra["size"]} if extra else {})})
+        out_size = extra["size"] if extra else (dst.stat().st_size if dst.exists() else 0)
+        done.append({**_slim(a), "method": method, "out_size": out_size, "seconds": round(time.time() - started)})
     return done
+
+
+def _already_done(path: Path, settings: dict) -> bool:
+    try:
+        info = transcode.probe(path)
+    except Exception:  # noqa: BLE001 — unreadable: let the real run report it
+        return False
+    if not info.get("video"):
+        return False
+    needs_video, _ = transcode.video_decision(info, settings)
+    return not needs_video and not transcode.processing_reasons(transcode.select_tracks(info, settings))
 
 
 def _slim(a: dict) -> dict:

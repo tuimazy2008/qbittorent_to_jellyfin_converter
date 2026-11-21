@@ -197,3 +197,16 @@ def test_empty_language_list_keeps_everything():
     sel = transcode.select_tracks(info, {**S, "keep_langs": [], "voice_track": False})
     assert len(sel["keep"]) == 3 and len(sel["subs_keep"]) == 2
     assert transcode.processing_reasons(sel) == []
+
+
+@needs_ffmpeg
+def test_inplace_rerun_skips_finished_files(tmp_path):
+    from jellyprep import executor
+    f = tmp_path / "Show S01E01.mkv"
+    make_clip(f, 640, 360)
+    info = transcode.probe(f)
+    transcode.process(str(f), str(f), info, S, transcode=False)        # first run adds the voice track
+    plan = {"target": str(tmp_path), "actions": [{"src": str(f), "dst": str(f), "action": "process", "inplace": True,
+                                                   "type": "video", "size": f.stat().st_size, "info": info}]}
+    res = executor.execute(plan, log=lambda m: None, settings=S)
+    assert res[0]["method"] == "exists"                                  # second run (after a restart) skips it

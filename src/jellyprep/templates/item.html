@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import state %}
+{% from "_macros.html" import state, pipe_full %}
 {% block title %}{{ item.name }} · jellyprep{% endblock %}
 {% block content %}
 {% set id = item.ident or {} %}
@@ -8,6 +8,9 @@
 <h1>{{ item.name }}</h1>
 <p>{{ state(item.state) }} · категория <b>{{ item.category }}</b> · <code>{{ item.content_path }}</code></p>
 {% if item.error %}<p class="banner bad">{{ item.error }}</p>{% endif %}
+
+<h2>Путь задачи</h2>
+{{ pipe_full(pipe) }}
 
 <div class="actions">
   {% if item.state in ["review", "error"] and plan.actions %}
@@ -106,6 +109,22 @@
   {% endfor %}
 </table></div>
 {% if plan.skipped %}<details><summary>Пропущено файлов: {{ plan.skipped|length }}</summary><ul>{% for f in plan.skipped %}<li><small>{{ f }}</small></li>{% endfor %}</ul></details>{% endif %}
+{% endif %}
+
+{% set files = (item.result or {}).get("files", []) %}
+{% if files %}
+<h2>Что сделано с файлами</h2>
+<div class="table-wrap"><table class="plan">
+  <tr><th>Файл в библиотеке</th><th>Как</th><th>Размер</th><th>Время</th></tr>
+  {% for f in files %}
+  <tr><td><small>{{ f.dst.replace(plan.target ~ "/", "") if plan.target else f.dst }}</small>
+        {% if f.reasons %}<br><small class="muted">{{ f.reasons|join("; ") }}</small>{% endif %}</td>
+      <td><span class="pill act-{{ f.method }}">{{ ACTION_LABELS.get(f.method, f.method) }}</span></td>
+      <td>{{ f.size|size }}{% if f.out_size and f.method in ["transcode", "process", "remux", "copy"] %} → {{ f.out_size|size }}{% endif %}</td>
+      <td>{% if f.seconds is defined and f.seconds >= 60 %}{{ (f.seconds // 60)|int }} мин{% elif f.seconds is defined %}{{ f.seconds }} с{% endif %}</td></tr>
+  {% endfor %}
+</table></div>
+<p class="hint">Хардлинк — тот же файл под новым именем: место не занимает, размер не меняется.</p>
 {% endif %}
 
 {% if item.hash %}

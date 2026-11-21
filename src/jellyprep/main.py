@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from . import config, transcode, worker as worker_mod
+from . import config, pipeline, transcode, worker as worker_mod
 from .clients import ClientError, Jellyfin, TMDB, llm_models
 from .db import APPROVED, DB, DONE, ERROR, NEW, REMOVED, REVIEW, RUNNING, SKIPPED
 from .media import free_bytes
@@ -85,8 +85,11 @@ def create_app(db: DB | None = None, start_worker: bool = True) -> FastAPI:
         rows = db.items(state or None)
         s = config.load(db)
         cats = db.categories()
+        ahead = _queue_positions(db)
         for r in rows:
             r["due"] = worker_mod.deletion_due(cats.get(r["category"]), r["ratio"] or 0, r["seeding_time"] or 0)
+            r["pipe"] = pipeline.build(r, s, cats.get(r["category"]), db.logs(r["id"], limit=50),
+                                       ahead.get(r["id"], 0), worker.status.get("job"))
         return render(request, "items.html", rows=rows, state=state, dry_run=s["dry_run"])
 
     @app.get("/items/{item_id}", response_class=HTMLResponse)
@@ -96,7 +99,10 @@ def create_app(db: DB | None = None, start_worker: bool = True) -> FastAPI:
             return back("/items")
         cat = db.categories().get(item["category"])
         due = worker_mod.deletion_due(cat, item["ratio"] or 0, item["seeding_time"] or 0)
-        return render(request, "item.html", item=item, cat=cat, due=due, logs=db.logs(item_id))
+        logs = db.logs(item_id)
+        pipe = pipeline.build(item, config.load(db), cat, logs, _queue_positions(db).get(item_id, 0),
+                              worker.status.get("job"))
+        return render(request, "item.html", item=item, cat=cat, due=due, logs=logs, pipe=pipe)
 
     @app.post("/items/{item_id}/approve")
     def item_approve(item_id: int):
@@ -370,6 +376,12 @@ def _coerce(values: dict) -> dict:
         else:
             out[k] = str(v).strip()
     return out
+
+
+def _queue_positions(db: DB) -> dict[int, int]:
+    """For each approved heavy job, how many heavy jobs are ahead of it (oldest first)."""
+    heavy = [i["id"] for i in reversed(db.items(APPROVED)) if worker_mod.is_heavy(i["plan"])]
+    return {item_id: n for n, item_id in enumerate(heavy)}
 
 
 def _suggest_category(src: dict, cats: list[dict]) -> str:

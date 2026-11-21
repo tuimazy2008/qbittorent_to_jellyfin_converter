@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import state %}
+{% from "_macros.html" import state, pipe_strip %}
 {% block content %}
 <h1>Задачи</h1>
 {% if dry_run %}<p class="banner warn">Режим dry-run: jellyprep показывает, что сделал бы, но ничего не меняет.
@@ -12,25 +12,21 @@
 </nav>
 <div class="table-wrap">
 <table class="items">
-  <tr><th>Торрент / папка</th><th>Категория</th><th>Распознано как</th><th>Уверенность</th><th>Что будет сделано</th><th>Состояние</th><th>Раздача</th></tr>
+  <tr><th>Торрент / папка</th><th>Распознано как</th><th>Этап и причина</th></tr>
   {% for r in rows %}
   {% set id = r.ident or {} %}
   <tr>
-    <td><a href="/items/{{ r.id }}">{{ r.name }}</a>{% if r.source == "folder" %} <span class="pill">папка</span>{% endif %}</td>
-    <td>{{ r.category }}</td>
+    <td><a href="/items/{{ r.id }}">{{ r.name }}</a><br><small class="muted">{{ r.category }}{% if r.source == "folder" %} · папка{% endif %}</small></td>
     <td>
       {% if id.kind == "tv" %}{% set c = id.show.chosen or {} %}📺 {{ c.title or "?" }}{% if c.year %} ({{ c.year }}){% endif %} · {{ id.episodes|length }} сер.
       {% elif id.kind == "movie" %}{% for m in id.movies[:2] %}{% set c = m.chosen or {} %}🎬 {{ c.title or "?" }}{% if c.year %} ({{ c.year }}){% endif %}{% if not loop.last %}<br>{% endif %}{% endfor %}{% if id.movies|length > 2 %} … ещё {{ id.movies|length - 2 }}{% endif %}
       {% else %}—{% endif %}
+      {% if r.ident %}<br><small class="muted">уверенность {{ (id.confidence * 100)|round|int }}%</small>{% endif %}
     </td>
-    <td>{% if r.ident %}{{ (id.confidence * 100)|round|int }}%{% endif %}</td>
-    <td><small>{% if r.plan %}{% set ns = namespace(c={}) %}{% for a in r.plan.actions if a.type == "video" %}{% set _ = ns.c.update({a.action: ns.c.get(a.action, 0) + 1}) %}{% endfor %}{% for k, v in ns.c.items() %}{{ ACTION_LABELS.get(k, k) }}{% if v > 1 %} ×{{ v }}{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}{% if needs_window(r.plan) and s.night_only and not r.plan.run_now and r.state == "approved" %}<br><span class="muted">ждёт ночи {{ s.night_start }}</span>{% endif %}{% endif %}</small></td>
-    <td>{{ state(r.state) }}{% if r.state == "approved" and dry_run %} <small class="muted">ждёт выключения dry-run</small>{% endif %}</td>
-    <td>{% if r.source == "folder" %}<small class="muted">—</small>{% else %}<small>{{ "%.2f"|format(r.ratio or 0) }} · {{ r.seeding_time|days }} дн.
-      {% if r.state == "done" %}<br>{% if r.due[0] %}<span class="warn">{{ "будет удалён" if dry_run else "удаляется" }}: {{ r.due[1] }}</span>{% else %}<span class="muted">{{ r.due[1] }}</span>{% endif %}{% endif %}</small>{% endif %}</td>
+    <td class="pipe-cell">{{ pipe_strip(r.pipe) }}</td>
   </tr>
   {% else %}
-  <tr><td colspan="7" class="muted">Пока пусто. Торренты появятся, когда в выбранных категориях будут завершённые загрузки.
+  <tr><td colspan="3" class="muted">Пока пусто. Торренты появятся, когда в выбранных категориях будут завершённые загрузки.
     Нажмите «Проверить сейчас», чтобы не ждать.</td></tr>
   {% endfor %}
 </table>

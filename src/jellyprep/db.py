@@ -52,9 +52,11 @@ CREATE TABLE IF NOT EXISTS log (
 CREATE INDEX IF NOT EXISTS log_item ON log(item_id);
 """
 
-JSON_COLS = ("ident", "plan", "result", "options")
+JSON_COLS = ("ident", "plan", "result", "options", "trace")
 # Columns added after v0.1; applied to existing databases on start.
-MIGRATIONS = [("options", "options TEXT")]
+MIGRATIONS = [("options", "options TEXT"),
+              ("trace", "trace TEXT"),   # when and why each pipeline step happened
+              ("note", "note TEXT")]     # why the item is waiting right now (space, …)
 
 # Item states
 NEW, REVIEW, APPROVED, RUNNING, DONE, REMOVED, SKIPPED, ERROR = (
@@ -127,6 +129,16 @@ class DB:
         cols = ", ".join(f"{k}=?" for k in fields)
         vals = tuple(_encode(k, v) for k, v in fields.items())
         self.execute(f"UPDATE items SET {cols} WHERE id=?", (*vals, item_id))
+
+    def trace(self, item_id: int, **fields: Any) -> None:
+        """Merge fields into the item's pipeline trace."""
+        with self._lock:
+            row = self._conn.execute("SELECT trace FROM items WHERE id=?", (item_id,)).fetchone()
+            current = json.loads(row["trace"]) if row and row["trace"] else {}
+            current.update(fields)
+            self._conn.execute("UPDATE items SET trace=? WHERE id=?",
+                               (json.dumps(current, ensure_ascii=False), item_id))
+            self._conn.commit()
 
     def item(self, item_id: int) -> dict | None:
         rows = self.query("SELECT * FROM items WHERE id=?", (item_id,))

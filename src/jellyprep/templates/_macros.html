@@ -19,3 +19,28 @@
 {% macro state(st) -%}
 <span class="pill st-{{ st }}">{{ STATE_LABELS.get(st, st) }}</span>
 {%- endmacro %}
+
+{% macro pipe_strip(pipe) -%}
+<div class="pipe-strip" title="{% for st in pipe.stages %}{{ st.title }}: {{ {'done':'✓','current':'сейчас','wait':'ждёт','todo':'впереди','skip':'не нужно','error':'ошибка'}[st.status] }}{% if not loop.last %} → {% endif %}{% endfor %}">
+  {% for st in pipe.stages %}<span class="dot dot-{{ st.status }}"></span>{% if not loop.last %}<span class="bar bar-{{ 'done' if st.status in ['done', 'skip'] else 'todo' }}"></span>{% endif %}{% endfor %}
+</div>
+<div class="pipe-now pipe-{{ pipe.current.status }}"><b>{{ pipe.current.title }}</b>{% if pipe.current.lines %}: {{ pipe.current.lines[-1] }}{% endif %}
+  {% if pipe.current.progress is not none %}<span class="mini-progress"><span style="width: {{ (pipe.current.progress * 100)|round|int }}%"></span></span>{% endif %}</div>
+{%- endmacro %}
+
+{% macro pipe_full(pipe) -%}
+<ol class="pipe-full">
+  {% for st in pipe.stages %}
+  <li class="ps ps-{{ st.status }}">
+    <span class="ps-dot"></span>
+    <div class="ps-body">
+      <div class="ps-head"><b>{{ st.title }}</b>
+        <span class="ps-tag">{{ {'done':'готово','current':'сейчас','wait':'ждёт','todo':'впереди','skip':'не нужно','error':'ошибка'}[st.status] }}</span>
+        {% if st.when %}<small class="muted">{{ st.when|ts }}</small>{% endif %}</div>
+      {% for line in st.lines %}<div class="ps-line">{{ line }}</div>{% endfor %}
+      {% if st.progress is not none %}<div class="progress"><span style="width: {{ (st.progress * 100)|round|int }}%"></span></div>{% endif %}
+    </div>
+  </li>
+  {% endfor %}
+</ol>
+{%- endmacro %}

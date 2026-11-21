@@ -281,3 +281,30 @@ def test_inplace_space_check_counts_largest_file_only(tmp_path, monkeypatch):
     assert executor.needed_bytes(plan) == 12 * 1024**3
     monkeypatch.setattr(media, "free_bytes", lambda p: 70 * 1024**3)
     executor.check_space(plan, min_free_gb=50)              # 70 - 12 >= 50: fits
+
+
+def test_inplace_job_continues_past_a_broken_file(heavy_env, db, monkeypatch):
+    w, qb, tmp, calls = heavy_env
+    lib = tmp / "library" / "movies"
+    good = make_file(lib / "Смерть ей к лицу (1992) [tmdbid-598]" / "Смерть ей к лицу (1992) - part1.mkv")
+    bad = make_file(lib / "Смерть ей к лицу (1992) [tmdbid-598]" / "Смерть ей к лицу (1992) - part2.mkv")
+
+    def flaky(src, dst, info, s, *, transcode, progress=None):
+        if src == str(bad):
+            raise transcode_mod.FFmpegError("длительность не совпадает: 1614 c → 47 c")
+        calls.append(src)
+        return {"hw": "test", "seconds": 1, "size": 10}
+
+    from jellyprep import transcode as transcode_mod
+    monkeypatch.setattr(transcode_mod, "process", flaky)
+    monkeypatch.setattr("jellyprep.executor._already_done", lambda p, s: False)
+    w.import_folder(str(lib), "movies")
+    w.run_cycle()
+    item = db.items()[0]
+    w.analyze(item["id"], {"kind": "movie", "movies": {"0": {"tmdb_id": 598}}})
+    w.approve(item["id"])
+    assert w.run_next_heavy() is True
+    item = db.item(item["id"])
+    assert item["state"] == DONE and calls == [str(good)]
+    assert "не обработано файлов: 1" in item["note"] and bad.exists()
+    assert [r["method"] for r in item["result"]["files"] if r["type"] == "video"] == ["process", "failed"]

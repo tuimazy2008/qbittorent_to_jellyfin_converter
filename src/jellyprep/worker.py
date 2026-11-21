@@ -246,7 +246,10 @@ class Worker:
             state, why = REVIEW, f"уверенность {conf:.0%} < {s['confidence']:.0%}"
         else:
             state, why = REVIEW, "категория требует подтверждения"
-        self.db.update_item(item_id, state=state, ident=ident, plan=plan, error=None)
+        self.db.update_item(item_id, state=state, ident=ident, plan=plan, error=None, note=None)
+        self.db.trace(item_id, identified_at=time.time(), decision=why,
+                      approved_by="auto" if state == APPROVED else None,
+                      approved_at=time.time() if state == APPROVED else None)
         self.db.log(f"Распознано ({why}): {_summary(ident)}; {_plan_summary(plan)} → "
                     f"{'одобрено' if state == APPROVED else 'на проверку'}", item_id=item_id)
 
@@ -258,6 +261,7 @@ class Worker:
             self.db.update_item(item_id, plan={**item["plan"], "run_now": True})
         if item["state"] in (REVIEW, ERROR):
             self.db.update_item(item_id, state=APPROVED, error=None)
+            self.db.trace(item_id, approved_by="manual", approved_at=time.time())
             self.db.log("Одобрено вручную" + (", выполнить не дожидаясь ночи" if run_now else ""), item_id=item_id)
         elif run_now:
             self.db.log("Выполнить не дожидаясь ночи", item_id=item_id)
@@ -277,6 +281,7 @@ class Worker:
             self.status["job"] = {"item_id": item_id, "name": item["name"], "file": name, "n": n,
                                   "total": total, "percent": round(frac * 100, 1), "speed": speed}
 
+        self.db.trace(item_id, started_at=time.time())
         try:
             executor.check_space(plan, s["min_free_gb"], s["link_fallback"])
             results = executor.execute(plan, s["link_fallback"], log=lambda m: self.db.log(m, item_id=item_id),
@@ -285,7 +290,7 @@ class Worker:
             if problems:
                 raise RuntimeError("; ".join(problems))
         except executor.NotEnoughSpace as e:
-            self.db.update_item(item_id, state=APPROVED)
+            self.db.update_item(item_id, state=APPROVED, note=f"ждёт места на диске: {e}")
             self.db.log(f"Ждёт места на диске: {e}", "warning", item_id)
             return False
         except Exception as e:
@@ -295,7 +300,10 @@ class Worker:
             return False
         finally:
             self.status["job"] = None
-        self.db.update_item(item_id, state=DONE, result={"files": results}, processed_at=time.time())
+        failed = [r for r in results if r["method"] == "failed"]
+        note = (f"не обработано файлов: {len(failed)} (оставлены как были): "
+                + ", ".join(Path(r["src"]).name for r in failed[:3]) + (" …" if len(failed) > 3 else "")) if failed else None
+        self.db.update_item(item_id, state=DONE, result={"files": results}, processed_at=time.time(), note=note)
         self.db.log(f"Готово: {plan['target']}", item_id=item_id)
         if item["source"] == "folder":
             self.finish_folder_item(item_id, results)
@@ -325,6 +333,7 @@ class Worker:
             self.db.log("Обработано на месте", item_id=item_id)
             return
         self.db.update_item(item_id, state=REMOVED, removed_at=time.time())
+        self.db.trace(item_id, removed_reason=f"перенос из папки: удалено исходных файлов {removed}")
         self.db.log(f"Перенос завершён: удалено исходных файлов {removed}", item_id=item_id)
 
     def cleanup(self, s: dict, qb: QBit, torrents: dict[str, dict]) -> None:
@@ -335,6 +344,7 @@ class Worker:
             t = torrents.get(item["hash"])
             if t is None:
                 self.db.update_item(item["id"], state=REMOVED, removed_at=time.time())
+                self.db.trace(item["id"], removed_reason="торрент удалён вне jellyprep")
                 self.db.log("Торрент удалён вне сервиса", item_id=item["id"])
                 continue
             due, reason = deletion_due(cats.get(item["category"]), t.get("ratio", 0), t.get("seeding_time", 0))
@@ -348,12 +358,15 @@ class Worker:
             if any(f["dst"] == content or f["dst"].startswith(content + "/") for f in files):
                 problems.append("файлы библиотеки лежат внутри папки торрента")
             if problems:
+                self.db.execute("UPDATE items SET note=? WHERE id=?",
+                                ("удаление отложено: " + "; ".join(problems), item["id"]))
                 self.db.log(f"Не удаляю торрент, библиотека не в порядке: {'; '.join(problems)}", "warning", item["id"])
                 continue
             if s["dry_run"]:
                 continue
             qb.delete(item["hash"], delete_files=True)
             self.db.update_item(item["id"], state=REMOVED, removed_at=time.time())
+            self.db.trace(item["id"], removed_reason=f"условие раздачи выполнено: {reason}")
             self.db.log(f"Торрент удалён вместе с файлами ({reason})", item_id=item["id"])
 
     def refresh_jellyfin(self, s: dict) -> None:
@@ -437,7 +450,8 @@ def _summary(ident: dict) -> str:
 
 
 ACTION_LABELS = {"hardlink": "хардлинк", "transcode": "перекодирование", "process": "обработка звука",
-                 "remux": "перепаковка", "exists": "уже в библиотеке"}
+                 "remux": "перепаковка", "exists": "уже в библиотеке", "copy": "копия",
+                 "failed": "не обработан"}
 
 
 def _plan_summary(plan: dict) -> str:
