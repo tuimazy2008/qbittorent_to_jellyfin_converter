@@ -174,3 +174,8 @@ tr.warnrow td { background: var(--warn-bg); }
 .summary-list { list-style: none; padding: 0; margin: 4px 0; } .summary-list li { padding: 2px 0; }
 .catrow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 0; }
 .catrow label { margin: 0; }
+
+.danger-zone { border: 1px solid var(--bad); border-radius: 8px; padding: 6px 12px; margin: 10px 0; }
+.danger-zone > summary { color: var(--bad); cursor: pointer; }
+button.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+.st-deleted { background: var(--bad-bg); color: var(--bad); }

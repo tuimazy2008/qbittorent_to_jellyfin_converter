@@ -65,8 +65,8 @@ MIGRATIONS = [("options", "options TEXT"),
               ("note", "note TEXT")]     # why the item is waiting right now (space, …)
 
 # Item states
-NEW, REVIEW, APPROVED, RUNNING, DONE, REMOVED, SKIPPED, ERROR = (
-    "new", "review", "approved", "running", "done", "removed", "skipped", "error")
+NEW, REVIEW, APPROVED, RUNNING, DONE, REMOVED, SKIPPED, ERROR, DELETED = (
+    "new", "review", "approved", "running", "done", "removed", "skipped", "error", "deleted")
 
 
 class DB:

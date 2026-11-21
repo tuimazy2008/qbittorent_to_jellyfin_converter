@@ -5,7 +5,7 @@ import re
 from typing import Any
 
 from . import worker as w
-from .db import APPROVED, DONE, ERROR, NEW, REMOVED, REVIEW, RUNNING, SKIPPED
+from .db import APPROVED, DELETED, DONE, ERROR, NEW, REMOVED, REVIEW, RUNNING, SKIPPED
 
 DONE_, CURRENT, WAIT, TODO, SKIP, FAIL = "done", "current", "wait", "todo", "skip", "error"
 ACTION_LABELS = {"hardlink": "хардлинк", "transcode": "перекодирование", "process": "обработка звука",
@@ -180,6 +180,12 @@ def build(item: dict, s: dict, cat: dict | None, logs: list[dict], queue_ahead: 
     else:
         stages.append(_stage("removed", "Оригинал удалён", TODO))
 
+    if st == DELETED:   # deleted by hand: nothing further happens
+        for x in stages:
+            if x["key"] in ("review", "prepare", "library", "seeding") and x["status"] in (TODO, WAIT, CURRENT, FAIL):
+                x["status"], x["lines"] = SKIP, []
+        stages[-1] = _stage("removed", "Удалено вручную", DONE_, tr.get("removed_reason") or "", when=item.get("removed_at"))
+        return {"stages": stages, "current": stages[-1]}
     current = next((x for x in stages if x["status"] in (CURRENT, WAIT, FAIL)), None)
     if st == SKIPPED:
         current = stages[2]

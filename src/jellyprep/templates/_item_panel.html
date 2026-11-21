@@ -49,6 +49,30 @@
   {% endif %}
 </div>
 
+{% set dp = del_preview %}
+{% if item.state not in ["deleted", "removed", "running"] and dp %}
+<details class="danger-zone">
+  <summary>🗑 Удалить раздачу…</summary>
+  {% if dp.refusal %}<p class="bad">{{ dp.refusal }}</p>
+  {% else %}
+  <form method="post" action="/items/{{ item.id }}/delete"
+        onsubmit="return confirm('Удалить безвозвратно {{ dp.files|length|files }} ({{ dp.total|size }})?')">
+    <p><b>Будет удалено безвозвратно:</b></p>
+    <ul>
+      {% if dp.torrent %}<li>торрент «{{ dp.torrent }}» из qBittorrent — раздача прекратится</li>{% endif %}
+      <li>{{ dp.files|length|files }}, {{ dp.total|size }}: <code>{{ dp.path }}</code></li>
+    </ul>
+    {% if dp.files %}<details><summary>Список файлов</summary><ul class="small">{% for p, sz in dp.files[:40] %}<li>{{ p.replace(dp.path ~ "/", "") }} <span class="muted">{{ sz|size }}</span></li>{% endfor %}{% if dp.files|length > 40 %}<li class="muted">… ещё {{ dp.files|length - 40 }}</li>{% endif %}</ul></details>{% endif %}
+    {% if dp.library %}
+    <label class="inline"><input type="checkbox" name="with_library" value="1">
+      также удалить уже разложенное из библиотеки: {{ dp.library|length|files }}, {{ dp.library_total|size }}</label>
+    {% endif %}
+    <p><button class="danger">Да, удалить {{ dp.files|length|files }} ({{ dp.total|size }})</button></p>
+  </form>
+  {% endif %}
+</details>
+{% endif %}
+
 {% if item.state in ["done", "removed"] and plan.target %}
 <p class="hint">Задача уже выполнена. Чтобы переразложить или обработать её файлы заново (например, исправить сезоны или добавить
 «{{ VOICE_TITLE }}»), откройте <a href="/import">Перенос</a> и нажмите «Обработать» у новой библиотеки —

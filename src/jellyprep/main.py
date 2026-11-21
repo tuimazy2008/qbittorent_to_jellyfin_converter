@@ -17,7 +17,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import board, config, pipeline, survey, transcode, worker as worker_mod
 from .clients import ClientError, Jellyfin, TMDB, llm_models
-from .db import APPROVED, DB, DONE, ERROR, NEW, REMOVED, REVIEW, RUNNING, SKIPPED
+from .db import APPROVED, DB, DELETED, DONE, ERROR, NEW, REMOVED, REVIEW, RUNNING, SKIPPED
 from .media import free_bytes
 
 HERE = Path(__file__).parent
@@ -37,7 +37,7 @@ STEPS = [
 STEP_IDS = [s for s, _ in STEPS]
 STATE_LABELS = {NEW: "новый", REVIEW: "на проверке", APPROVED: "в очереди", RUNNING: "выполняется",
                 DONE: "в библиотеке",
-                REMOVED: "оригинал удалён", SKIPPED: "пропущен", ERROR: "ошибка"}
+                REMOVED: "оригинал удалён", DELETED: "удалено вручную", SKIPPED: "пропущен", ERROR: "ошибка"}
 OFF_BY_DEFAULT = re.compile(r"(?i)radarr|sonarr|lidarr|readarr|music|audio|book")
 CLEANUP_PRESETS = {
     "r2d30": (True, 2.0, 30.0),
@@ -64,7 +64,7 @@ def create_app(db: DB | None = None, start_worker: bool = True) -> FastAPI:
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
     tpl = Jinja2Templates(directory=HERE / "templates")
     tpl.env.filters.update(size=_size, ts=_ts, days=lambda s: f"{(s or 0) / 86400:.0f}",
-                           pretty_json=_pretty_json, mmss=_mmss)
+                           pretty_json=_pretty_json, mmss=_mmss, files=_files_word)
     tpl.env.globals.update(STATE_LABELS=STATE_LABELS, STEPS=STEPS, ACTION_LABELS=worker_mod.ACTION_LABELS, VOICE_TITLE=transcode.VOICE_TITLE,
                            is_heavy=worker_mod.is_heavy, needs_window=worker_mod.needs_window)
 
@@ -123,6 +123,7 @@ def create_app(db: DB | None = None, start_worker: bool = True) -> FastAPI:
         convs = ([{**live.as_dict(), "live": True}] if live else []) + ((item.get("trace") or {}).get("llm_log") or [])
         cats = db.categories()
         return {"item": item, "cat": cat, "due": due, "logs": logs, "pipe": pipe, "convs": convs, "now": time.time(),
+                "del_preview": worker.delete_preview(item_id),
                 "summary": pipeline.confirm_summary(item, config.load(db), cat), "all_cats": list(cats.values()),
                 "cat_hint": (item.get("ident") or {}).get("category_hint")}
 
@@ -170,6 +171,15 @@ def create_app(db: DB | None = None, start_worker: bool = True) -> FastAPI:
                 worker_mod.set_category(db, item_id, form.get("category", ""))
                 ov = {k: v for k, v in ov.items() if k not in ("kind", "category_ok")}
                 worker.analyze(item_id, ov)
+        return back_item(request, item_id)
+
+    @app.post("/items/{item_id}/delete")
+    async def item_delete(request: Request, item_id: int):
+        form = await request.form()
+        try:
+            worker.delete_item(item_id, with_library=form.get("with_library") == "1")
+        except ValueError as e:
+            db.log(f"Удаление не выполнено: {e}", "warning", item_id)
         return back_item(request, item_id)
 
     @app.post("/items/{item_id}/llm-cancel")
@@ -431,6 +441,13 @@ def _ok(message: str, **extra) -> JSONResponse:
 
 def _fail(message: str) -> JSONResponse:
     return JSONResponse({"ok": False, "message": message})
+
+
+def _files_word(n: int) -> str:
+    n = int(n or 0)
+    word = "файл" if n % 10 == 1 and n % 100 != 11 else (
+        "файла" if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else "файлов")
+    return f"{n} {word}"
 
 
 def _pretty_json(text: str) -> str:

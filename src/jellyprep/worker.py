@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import re
+import shutil
 import os
 import threading
 import time
@@ -19,7 +20,7 @@ from typing import Any
 
 from . import config, executor, identify, llm, media, parse, planner, transcode
 from .clients import QBit, TMDB, ClientError, Jellyfin, is_complete
-from .db import APPROVED, DB, DONE, ERROR, NEW, REMOVED, REVIEW, RUNNING, SKIPPED
+from .db import APPROVED, DB, DELETED, DONE, ERROR, NEW, REMOVED, REVIEW, RUNNING, SKIPPED
 
 log = logging.getLogger("jellyprep")
 
@@ -28,6 +29,21 @@ LLM_THINKING = "модель думает…"
 LLM_QUEUED = "в очереди к модели"
 FRAMES_DIR = config.CONFIG_DIR / "frames"
 CATEGORY_PROBLEM = "Категория"
+
+
+def _delete_refusal(item: dict, src: Path, s: dict) -> str | None:
+    """Reasons not to delete: running job, or a path that isn't this release's own file/folder."""
+    if item["state"] == RUNNING:
+        return "задача сейчас выполняется — дождитесь окончания"
+    if item["state"] in (REMOVED, DELETED):
+        return "оригинал уже удалён"
+    real = os.path.realpath(src)
+    lib = os.path.realpath(s["library_root"])
+    if real in ("/", os.path.realpath("/media"), lib) or lib.startswith(real + os.sep) or len(Path(real).parts) < 3:
+        return f"отказ: {src} — не отдельная раздача"
+    if item.get("source") == "folder" and real.startswith(lib + os.sep) and not item.get("hash"):
+        return "это файлы новой библиотеки (обработка на месте) — удаляйте через «удалить и из библиотеки» у исходной задачи"
+    return None
 
 
 def _show_is_weak(ident: dict) -> bool:
@@ -731,6 +747,71 @@ class Worker:
         self.db.execute("UPDATE items SET note=? WHERE id=?",
                         (f"предложение модели — проверьте и подтвердите: {comment}", item_id))
         self.db.log(f"Модель предложила ({round(time.time() - started)} с): {comment}", item_id=item_id)
+
+    # --- deleting a release by hand ---------------------------------------------------------
+    def delete_preview(self, item_id: int) -> dict:
+        """Exactly what "delete" would remove, for the confirmation block."""
+        item = self.db.item(item_id)
+        s = config.load(self.db)
+        src = Path(item["content_path"])
+        files = []
+        if src.is_file():
+            files = [(str(src), src.stat().st_size)]
+        elif src.is_dir():
+            files = [(str(p), p.stat().st_size) for p in sorted(src.rglob("*")) if p.is_file()]
+        lib = [(r["dst"], Path(r["dst"]).stat().st_size) for r in (item.get("result") or {}).get("files", [])
+               if Path(r["dst"]).is_file() and os.path.realpath(r["dst"]) != os.path.realpath(r["src"])]
+        is_torrent = bool(item.get("hash")) and item.get("source", "torrent") == "torrent"
+        problem = _delete_refusal(item, src, s)
+        return {"torrent": item["name"] if is_torrent else None, "path": str(src), "files": files,
+                "total": sum(sz for _, sz in files), "library": lib, "library_total": sum(sz for _, sz in lib),
+                "refusal": problem}
+
+    def delete_item(self, item_id: int, with_library: bool = False) -> dict:
+        """Delete the release (torrent with its files via qBittorrent, or the imported file/folder)."""
+        prev = self.delete_preview(item_id)
+        if prev["refusal"]:
+            raise ValueError(prev["refusal"])
+        item = self.db.item(item_id)
+        s = config.load(self.db)
+        with self._llm_lock:
+            conv = self.llm_jobs.get(item_id)
+        if conv:
+            self.cancel_llm(item_id)
+        if prev["torrent"]:
+            try:
+                qbit_client(s).delete(item["hash"], delete_files=True)
+            except ClientError as e:
+                raise ValueError(f"qBittorrent не удалил торрент: {e}") from e
+        else:
+            src = Path(prev["path"])
+            if src.is_dir():
+                shutil.rmtree(src)
+            elif src.exists():
+                src.unlink()
+        removed_lib = 0
+        if with_library:
+            for dst, _ in prev["library"]:
+                Path(dst).unlink(missing_ok=True)
+                removed_lib += 1
+            target = (item.get("plan") or {}).get("target")
+            if target and Path(target).is_dir():
+                for d in sorted((p for p in Path(target).rglob("*") if p.is_dir()), key=lambda p: -len(p.parts)) + [Path(target)]:
+                    try:
+                        d.rmdir()
+                    except OSError:
+                        pass
+        what = (f"торрент «{prev['torrent']}» удалён из qBittorrent вместе с файлами" if prev["torrent"]
+                else f"удалено с диска: {prev['path']}")
+        what += f" ({len(prev['files'])} файлов, {prev['total'] / 1024 ** 3:.1f} ГБ)"
+        if removed_lib:
+            what += f"; из библиотеки удалено файлов: {removed_lib}"
+        self.db.update_item(item_id, state=DELETED, removed_at=time.time(), note=f"удалено вручную: {what}")
+        self.db.trace(item_id, removed_reason=f"удалено вручную: {what}")
+        self.db.log(f"Удалено вручную: {what}", "warning", item_id)
+        if removed_lib:
+            self.refresh_jellyfin(s)
+        return prev
 
     def skip(self, item_id: int) -> None:
         self.db.update_item(item_id, state=SKIPPED)

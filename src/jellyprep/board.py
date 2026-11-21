@@ -8,7 +8,7 @@ import time
 from typing import Any
 
 from . import llm, pipeline, worker as w
-from .db import APPROVED, DONE, ERROR, NEW, REMOVED, REVIEW, RUNNING, SKIPPED
+from .db import APPROVED, DELETED, DONE, ERROR, NEW, REMOVED, REVIEW, RUNNING, SKIPPED
 
 STAGES = ["Загрузка", "Распознавание", "Обработка", "Библиотека", "Раздача"]
 GROUPS = [("decision", "Нужно твоё решение"), ("work", "В работе"), ("seeding", "Раздаются"), ("done", "Готово")]
@@ -120,6 +120,8 @@ def item_row(item: dict, s: dict, cat: dict | None, logs: list[dict], queue_ahea
             line += f" · {item['note']}"
     elif state == SKIPPED:
         icon, group, line = "⤼", "done", "пропущено"
+    elif state == DELETED:
+        icon, group, line = "🗑", "done", item.get("note") or "удалено вручную"
     else:  # removed, or done without a torrent
         icon, group = "✓", "done"
         line = "; ".join(x for x in (st["prepare"]["lines"][:1] + st["removed"]["lines"][:1]) if x) or "готово"
