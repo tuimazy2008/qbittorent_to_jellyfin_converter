@@ -13,7 +13,7 @@ import os
 import threading
 import time
 import traceback
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from . import config, executor, identify, llm, media, planner, transcode
 from .clients import QBit, TMDB, ClientError, Jellyfin, is_complete
@@ -97,6 +97,34 @@ def safe_probe(path: str) -> dict | None:
         return transcode.probe(path)
     except Exception:  # noqa: BLE001 — unreadable file: the planner reports it
         return None
+
+
+def compare_with_rules(ident: dict, overrides: dict) -> tuple[bool, list[str]]:
+    """Does the model's answer say exactly what the rules found? Returns (agree, differences)."""
+    diff: list[str] = []
+    kind = ident.get("kind")
+    if overrides.get("kind") != kind:
+        return False, [f"модель считает это {'сериалом' if overrides.get('kind') == 'tv' else 'фильмом'}"]
+    if kind == "movie":
+        movies = ident.get("movies") or []
+        rules_id = ((movies[0].get("chosen") or {}).get("id")) if len(movies) == 1 else None
+        model_id = ((overrides.get("movies") or {}).get("0") or {}).get("tmdb_id")
+        if not rules_id or rules_id != model_id:
+            diff.append(f"фильм: TMDB {rules_id}, модель {model_id}")
+        return not diff, diff
+    rules_id = ((ident.get("show") or {}).get("chosen") or {}).get("id")
+    model_id = (overrides.get("show") or {}).get("tmdb_id")
+    if not rules_id or rules_id != model_id:
+        diff.append(f"сериал: TMDB {rules_id}, модель {model_id}")
+    rules = {e["file"]: (e["season"], e["episode"], e.get("episode_end")) for e in ident.get("episodes") or []}
+    model = {f: tuple(v) for f, v in (overrides.get("episodes") or {}).items()}
+    for f in sorted(set(rules) | set(model)):
+        if rules.get(f) != model.get(f):
+            show = lambda v: "нет" if not v else f"S{v[0]:02d}E{v[1]:02d}" + (f"-E{v[2]:02d}" if v[2] else "")  # noqa: E731
+            diff.append(f"{PurePath(f).name}: TMDB {show(rules.get(f))}, модель {show(model.get(f))}")
+    if ident.get("unmatched"):
+        diff.append(f"без номера у правил: {len(ident['unmatched'])}")
+    return not diff, diff
 
 
 class Worker:
@@ -281,10 +309,9 @@ class Worker:
         self.db.log(f"Распознано ({why}): {_summary(ident)}; {_plan_summary(plan)} → "
                     f"{'одобрено' if state == APPROVED else 'на проверку'}", item_id=item_id)
         tr = self.db.item(item_id).get("trace") or {}
-        # rules already found an answer and only want a confirmation: don't let the model overwrite it
-        hard = [p for p in problems if not p.startswith(INFO_PROBLEMS)] or conf < s["confidence"]
-        if (state == REVIEW and not manual and hard and s.get("llm_auto")
-                and llm.configured(s) and not tr.get("llm_tried")):
+        # the model either proposes an answer (rules failed) or double-checks the rules' answer
+        if (state == REVIEW and not manual and plan["actions"] and s.get("llm_auto") and llm.configured(s)
+                and not tr.get("llm_tried") and not (cat["approval"] == "always_confirm" and not problems)):
             self.ask_llm(item_id, auto=True)
 
     def approve(self, item_id: int, run_now: bool = False) -> None:
@@ -361,6 +388,29 @@ class Worker:
         self._save_conversation(item_id, conv)
         self.db.trace(item_id, llm_tried=True, llm_pending=False, llm_comment=comment,
                       llm_seconds=round(time.time() - started))
+        took = round(time.time() - started)
+        agree, diff = compare_with_rules(ident, overrides)
+        plan = item.get("plan") or {}
+        rules_sure = bool(plan.get("actions")) and all(
+            p.startswith(INFO_PROBLEMS) for p in (ident.get("problems") or []) + (plan.get("problems") or []))
+        if agree and rules_sure:
+            cat = self.db.categories().get(item["category"]) or {}
+            if s.get("llm_confirm_auto", True) and cat.get("approval") != "always_confirm" \
+                    and self.db.item(item_id)["state"] == REVIEW:
+                self.db.update_item(item_id, state=APPROVED, error=None,
+                                    note=f"модель согласна с TMDB — продолжено без подтверждения: {comment}")
+                self.db.trace(item_id, approved_by="model", approved_at=time.time(),
+                              decision="модель подтвердила результат правил")
+                self.db.log(f"Модель подтвердила результат правил ({took} с) → одобрено: {comment}", item_id=item_id)
+                self.trigger()
+            else:
+                self.db.execute("UPDATE items SET note=? WHERE id=?",
+                                (f"модель согласна с TMDB — подтвердите: {comment}", item_id))
+                self.db.log(f"Модель подтвердила результат правил ({took} с): {comment}", item_id=item_id)
+            return
+        if diff and rules_sure:
+            comment = "ответ модели расходится с TMDB: " + "; ".join(diff[:3]) + (" …" if len(diff) > 3 else "") \
+                + (f". Модель: {comment}" if comment else "")
         self.analyze(item_id, overrides)
         self.db.execute("UPDATE items SET note=? WHERE id=?",
                         (f"предложение модели — проверьте и подтвердите: {comment}", item_id))

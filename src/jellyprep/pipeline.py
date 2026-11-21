@@ -91,6 +91,9 @@ def build(item: dict, s: dict, cat: dict | None, logs: list[dict], queue_ahead: 
     elif approved_by == "manual":
         stages.append(_stage("review", "Проверка", DONE_, "подтверждено вручную",
                              when=tr.get("approved_at") or (manual or {}).get("ts")))
+    elif approved_by == "model":
+        stages.append(_stage("review", "Проверка", DONE_, "подтверждено моделью: её ответ совпал с TMDB",
+                             tr.get("llm_comment") or "", when=tr.get("approved_at")))
     else:
         stages.append(_stage("review", "Проверка", DONE_,
                              f"подтверждено автоматически: {decision}" if decision else "подтверждено автоматически",

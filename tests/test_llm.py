@@ -169,3 +169,65 @@ def test_panel_shows_conversation(db):
         html = c.get(f"/items/{item_id}/panel").text
     assert "Разговор с моделью" in html and "gemma-4-12b-qat" in html and "1 мин 53 с" in html
     assert "Это сериал." in html and "&#34;comment&#34;: &#34;ок&#34;" in html and "из них на рассуждения 2753" in html
+
+
+def _title_matched_item(db, tmp_path, monkeypatch, tmdb, approval="auto_if_confident"):
+    from jellyprep import config, worker as worker_mod
+    from conftest import make_file
+    root = tmp_path / "media" / "Тайны следствия"
+    for name in ("1. Мягкая лапа смерти (1 сер.).avi", "1. Мягкая лапа смерти (2 сер.).avi",
+                 "2. Гроб на две персоны (1 сер.).avi", "2. Гроб на две персоны (2 сер.).avi"):
+        make_file(root / name)
+    monkeypatch.setattr(worker_mod, "tmdb_client", lambda s: tmdb)
+    monkeypatch.setattr(worker_mod, "safe_probe", lambda p: {"video": None})
+    config.save(db, {"llm_kind": "openai", "llm_url": "http://lm/v1", "llm_model": "m", "llm_auto": False,
+                     "library_root": str(tmp_path / "lib")})
+    db.upsert_category("tv", enabled=1, kind="tv", approval=approval)
+    item_id = db.add_item(source="folder", name="Тайны следствия", category="tv", content_path=str(root))
+    w = worker_mod.Worker(db)
+    w.analyze(item_id)
+    assert db.item(item_id)["state"] == "review"
+    return w, item_id
+
+
+def _model_says(monkeypatch, mapping, tmdb_id=12345):
+    def fake_ask(s, prompt, conv=None):
+        conv.status = "ok"
+        return {"kind": "tv", "tmdb_id": tmdb_id, "title": "Тайны следствия", "year": 2000, "comment": "по названиям",
+                "episodes": [{"file": f, "season": se, "episode": ep} for f, (se, ep) in mapping.items()]}
+    monkeypatch.setattr(llm, "ask", fake_ask)
+
+
+RIGHT = {"1. Мягкая лапа смерти (1 сер.).avi": (1, 1), "1. Мягкая лапа смерти (2 сер.).avi": (1, 2),
+         "2. Гроб на две персоны (1 сер.).avi": (1, 3), "2. Гроб на две персоны (2 сер.).avi": (1, 4)}
+
+
+def test_model_agreeing_with_tmdb_continues_without_asking(db, tmp_path, monkeypatch, tmdb):
+    w, item_id = _title_matched_item(db, tmp_path, monkeypatch, tmdb)
+    _model_says(monkeypatch, RIGHT)
+    w.ask_llm(item_id, wait=True)
+    item = db.item(item_id)
+    assert item["state"] == "approved" and item["trace"]["approved_by"] == "model"
+    assert "продолжено без подтверждения" in item["note"]
+    assert {e["how"][:9] for e in item["ident"]["episodes"]} == {"по назван"}     # the rules' result is kept
+    from jellyprep import pipeline
+    p = pipeline.build(item, {"dry_run": True}, None, [])
+    assert "подтверждено моделью" in p["stages"][2]["lines"][0]
+
+
+def test_model_disagreeing_waits_and_shows_difference(db, tmp_path, monkeypatch, tmdb):
+    w, item_id = _title_matched_item(db, tmp_path, monkeypatch, tmdb)
+    wrong = {**RIGHT, "2. Гроб на две персоны (2 сер.).avi": (2, 1)}
+    _model_says(monkeypatch, wrong)
+    w.ask_llm(item_id, wait=True)
+    item = db.item(item_id)
+    assert item["state"] == "review"
+    assert "расходится с TMDB" in item["note"] and "TMDB S01E04, модель S02E01" in item["note"]
+
+
+def test_always_confirm_category_still_waits(db, tmp_path, monkeypatch, tmdb):
+    w, item_id = _title_matched_item(db, tmp_path, monkeypatch, tmdb, approval="always_confirm")
+    _model_says(monkeypatch, RIGHT)
+    w.ask_llm(item_id, wait=True)
+    item = db.item(item_id)
+    assert item["state"] == "review" and "модель согласна с TMDB — подтвердите" in item["note"]

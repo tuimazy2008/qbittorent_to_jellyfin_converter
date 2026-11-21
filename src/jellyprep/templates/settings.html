@@ -50,6 +50,7 @@
   <label>Ключ API {{ secret("llm_key", s.llm_key) }}</label>
   {{ test("llm") }}
   <label>Спрашивать модель
+    <select name="llm_confirm_auto" style="margin-bottom:6px"><option value="1"{% if s.llm_confirm_auto %} selected{% endif %}>если модель согласна с TMDB — продолжать без подтверждения</option><option value="0"{% if not s.llm_confirm_auto %} selected{% endif %}>всё равно спрашивать меня</option></select>
     <select name="llm_auto"><option value="1"{% if s.llm_auto %} selected{% endif %}>автоматически, если правила не справились</option><option value="0"{% if not s.llm_auto %} selected{% endif %}>только по кнопке</option></select></label>
 
   <h2>Jellyfin <span class="pill">необязательно</span></h2>
