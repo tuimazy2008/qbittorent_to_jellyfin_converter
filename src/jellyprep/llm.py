@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
+from dataclasses import dataclass, field, fields
 from pathlib import PurePath
 
 import httpx
@@ -16,6 +19,7 @@ from .clients import TMDB, ClientError
 
 TIMEOUT = httpx.Timeout(300.0, connect=5.0)
 MAX_EPISODE_LINES = 400
+MAX_SECONDS = 20 * 60
 
 SCHEMA = {
     "type": "object",
@@ -96,30 +100,102 @@ def episode_titles_for(tmdb: TMDB | None, candidates: list[dict], seasons_hint: 
     return out
 
 
-def ask(s: dict, prompt: str) -> dict:
+class LLMCancelled(LLMError):
+    pass
+
+
+@dataclass
+class Conversation:
+    """One exchange with the model, kept for the "conversation with the model" block."""
+    model: str
+    prompt: str
+    system: str = SYSTEM
+    reasoning: str = ""
+    content: str = ""
+    chunks: int = 0
+    started: float = field(default_factory=time.time)
+    finished: float | None = None
+    status: str = "running"          # running | ok | error | cancelled
+    error: str = ""
+    usage: dict = field(default_factory=dict)
+    cancel: threading.Event = field(default_factory=threading.Event, repr=False)
+
+    def as_dict(self) -> dict:
+        return {f.name: getattr(self, f.name) for f in fields(self) if f.name != "cancel"}
+
+
+def ask(s: dict, prompt: str, conv: Conversation | None = None) -> dict:
+    """Stream the answer (so it can be cancelled and its progress shown); return the parsed JSON."""
     kind, url, model = s["llm_kind"], s["llm_url"].rstrip("/"), s["llm_model"]
+    conv = conv or Conversation(model=model, prompt=prompt)
+    messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}]
     try:
         if kind == "ollama":
-            r = httpx.post(f"{url}/api/chat", timeout=TIMEOUT, json={
-                "model": model, "stream": False, "format": SCHEMA, "options": {"temperature": 0},
-                "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}]})
-            r.raise_for_status()
-            text = r.json()["message"]["content"]
+            req = {"url": f"{url}/api/chat", "json": {"model": model, "stream": True, "format": SCHEMA,
+                                                     "options": {"temperature": 0}, "messages": messages}}
         else:
             base = url if url.endswith("/v1") else f"{url}/v1"
-            headers = {"Authorization": f"Bearer {s['llm_key']}"} if s.get("llm_key") else {}
-            r = httpx.post(f"{base}/chat/completions", timeout=TIMEOUT, headers=headers, json={
-                "model": model, "temperature": 0,
-                "response_format": {"type": "json_schema",
-                                    "json_schema": {"name": "identification", "strict": True, "schema": SCHEMA}},
-                "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}]})
+            req = {"url": f"{base}/chat/completions",
+                   "headers": {"Authorization": f"Bearer {s['llm_key']}"} if s.get("llm_key") else {},
+                   "json": {"model": model, "temperature": 0, "stream": True,
+                            "stream_options": {"include_usage": True},
+                            "response_format": {"type": "json_schema", "json_schema": {
+                                "name": "identification", "strict": True, "schema": SCHEMA}},
+                            "messages": messages}}
+        with httpx.stream("POST", timeout=TIMEOUT, **req) as r:
             r.raise_for_status()
-            text = r.json()["choices"][0]["message"]["content"]
+            for line in r.iter_lines():
+                if conv.cancel.is_set():
+                    raise LLMCancelled("отменено")
+                if time.time() - conv.started > MAX_SECONDS:
+                    raise LLMError(f"модель думает дольше {MAX_SECONDS // 60} мин, прервано")
+                _feed(conv, kind, line)
+    except LLMError as e:
+        conv.status, conv.error, conv.finished = ("cancelled" if isinstance(e, LLMCancelled) else "error"), str(e), time.time()
+        raise
     except httpx.HTTPError as e:
-        raise LLMError(f"модель недоступна ({url}): {e}") from e
-    except (KeyError, IndexError, ValueError) as e:
-        raise LLMError(f"странный ответ сервера модели: {e}") from e
-    return parse_answer(text)
+        conv.status, conv.error, conv.finished = "error", f"модель недоступна ({url}): {e}", time.time()
+        raise LLMError(conv.error) from e
+    conv.finished = time.time()
+    if not conv.reasoning and (m := re.search(r"<think>(.*?)</think>", conv.content, re.S)):
+        conv.reasoning = m[1].strip()   # models that think inside the answer text
+    try:
+        answer = parse_answer(conv.content)
+    except LLMError as e:
+        conv.status, conv.error = "error", str(e)
+        raise
+    conv.status = "ok"
+    return answer
+
+
+def _feed(conv: Conversation, kind: str, line: str) -> None:
+    line = line.strip()
+    if not line:
+        return
+    if kind != "ollama":
+        if not line.startswith("data:"):
+            return
+        line = line[5:].strip()
+        if line == "[DONE]":
+            return
+    try:
+        obj = json.loads(line)
+    except ValueError:
+        return
+    if kind == "ollama":
+        msg = obj.get("message") or {}
+        conv.content += msg.get("content") or ""
+        conv.reasoning += msg.get("thinking") or ""
+        if obj.get("done"):
+            conv.usage = {"prompt_tokens": obj.get("prompt_eval_count"), "completion_tokens": obj.get("eval_count")}
+    else:
+        for ch in obj.get("choices") or []:
+            delta = ch.get("delta") or {}
+            conv.content += delta.get("content") or ""
+            conv.reasoning += delta.get("reasoning_content") or delta.get("reasoning") or ""
+        if obj.get("usage"):
+            conv.usage = obj["usage"]
+    conv.chunks += 1
 
 
 def parse_answer(text: str) -> dict:

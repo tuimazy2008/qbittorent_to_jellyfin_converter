@@ -37,6 +37,34 @@
 <div class="banner warn"><b>Нужно проверить:</b><ul>{% for p in problems %}<li>{{ p }}</li>{% endfor %}</ul></div>
 {% endif %}
 
+{% if convs %}
+<h2>Разговор с моделью</h2>
+{% for c in convs %}
+<details class="conv"{% if loop.first %} open{% endif %}>
+  <summary>🤖 <b>{{ c.model or "модель" }}</b> ·
+    {% if c.live %}<span class="warn">думает {{ ((now - c.started) if now else 0)|mmss }}</span>
+    {% elif c.status == "ok" %}<span class="ok">ответила</span>
+    {% elif c.status == "cancelled" %}<span class="muted">отменено</span>
+    {% else %}<span class="bad">ошибка</span>{% endif %}
+    · {{ c.started|ts }}{% if c.finished %} · {{ (c.finished - c.started)|mmss }}{% endif %}
+    {% if c.usage and c.usage.completion_tokens %} · {{ c.usage.completion_tokens }} токенов{% if c.usage.completion_tokens_details and c.usage.completion_tokens_details.reasoning_tokens %}, из них на рассуждения {{ c.usage.completion_tokens_details.reasoning_tokens }}{% endif %}{% endif %}
+  </summary>
+  {% if c.live %}
+  <p class="muted">Ответ ещё пишется (получено фрагментов: {{ c.chunks }}). Закройте и откройте задачу, чтобы увидеть, сколько уже написано.
+    <form method="post" action="/items/{{ item.id }}/llm-cancel" style="display:inline"><button class="small secondary">Отменить</button></form></p>
+  {% endif %}
+  {% if c.error %}<p class="bad">{{ c.error }}</p>{% endif %}
+  <details><summary>Что спросили</summary>
+    <p class="muted">Инструкция (одна для всех задач):</p><pre class="conv-pre">{{ c.system }}</pre>
+    <p class="muted">Данные по этой задаче:</p><pre class="conv-pre">{{ c.prompt or "(ещё готовится)" }}</pre></details>
+  <details{% if c.reasoning and not c.live %} open{% endif %}><summary>Что думала{% if c.reasoning %} ({{ c.reasoning|length }} символов){% else %} — модель не показала рассуждения{% endif %}</summary>
+    {% if c.reasoning %}<pre class="conv-pre">{{ c.reasoning }}</pre>{% endif %}</details>
+  <details{% if c.content and not c.live %} open{% endif %}><summary>Что ответила</summary>
+    <pre class="conv-pre">{{ (c.content|pretty_json) if c.content else "(пока ничего)" }}</pre></details>
+</details>
+{% endfor %}
+{% endif %}
+
 {% if item.ident %}
 <form method="post" action="/items/{{ item.id }}/override" class="panel">
 <h2>Распознавание <small class="muted">уверенность {{ (id.confidence * 100)|round|int }}%</small></h2>

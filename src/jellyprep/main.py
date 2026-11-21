@@ -62,7 +62,8 @@ def create_app(db: DB | None = None, start_worker: bool = True) -> FastAPI:
     app.add_middleware(SameOriginMiddleware)
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
     tpl = Jinja2Templates(directory=HERE / "templates")
-    tpl.env.filters.update(size=_size, ts=_ts, days=lambda s: f"{(s or 0) / 86400:.0f}")
+    tpl.env.filters.update(size=_size, ts=_ts, days=lambda s: f"{(s or 0) / 86400:.0f}",
+                           pretty_json=_pretty_json, mmss=_mmss)
     tpl.env.globals.update(STATE_LABELS=STATE_LABELS, STEPS=STEPS, ACTION_LABELS=worker_mod.ACTION_LABELS, VOICE_TITLE=transcode.VOICE_TITLE,
                            is_heavy=worker_mod.is_heavy, needs_window=worker_mod.needs_window)
 
@@ -83,7 +84,8 @@ def create_app(db: DB | None = None, start_worker: bool = True) -> FastAPI:
     def board_data() -> dict:
         s = config.load(db)
         return board.build(db.items(), worker.downloads(), s, db.categories(), lambda i: db.logs(i, limit=50),
-                           _queue_positions(db), worker.status.get("job"), worker.status.get("job_started"))
+                           _queue_positions(db), worker.status.get("job"), worker.status.get("job_started"),
+                           worker.llm_jobs)
 
     @app.get("/items", response_class=HTMLResponse)
     def items(request: Request):
@@ -116,7 +118,9 @@ def create_app(db: DB | None = None, start_worker: bool = True) -> FastAPI:
         logs = db.logs(item_id)
         pipe = pipeline.build(item, config.load(db), cat, logs, _queue_positions(db).get(item_id, 0),
                               worker.status.get("job"))
-        return {"item": item, "cat": cat, "due": due, "logs": logs, "pipe": pipe}
+        live = worker.llm_jobs.get(item_id)
+        convs = ([{**live.as_dict(), "live": True}] if live else []) + ((item.get("trace") or {}).get("llm_log") or [])
+        return {"item": item, "cat": cat, "due": due, "logs": logs, "pipe": pipe, "convs": convs, "now": time.time()}
 
     def back_item(request: Request, item_id: int) -> RedirectResponse:
         """After an action, return to the board (with the row open) if that's where it came from."""
@@ -138,6 +142,11 @@ def create_app(db: DB | None = None, start_worker: bool = True) -> FastAPI:
     @app.post("/items/{item_id}/ask-llm")
     def item_ask_llm(request: Request, item_id: int):
         worker.ask_llm(item_id)
+        return back_item(request, item_id)
+
+    @app.post("/items/{item_id}/llm-cancel")
+    def item_llm_cancel(request: Request, item_id: int):
+        worker.cancel_llm(item_id)
         return back_item(request, item_id)
 
     @app.post("/items/{item_id}/skip")
@@ -371,6 +380,20 @@ def _ok(message: str, **extra) -> JSONResponse:
 
 def _fail(message: str) -> JSONResponse:
     return JSONResponse({"ok": False, "message": message})
+
+
+def _pretty_json(text: str) -> str:
+    import json as _json
+    body = re.sub(r"<think>.*?</think>", "", text or "", flags=re.S).strip()
+    try:
+        return _json.dumps(_json.loads(body), ensure_ascii=False, indent=2)
+    except ValueError:
+        return text or ""
+
+
+def _mmss(sec: float | None) -> str:
+    sec = int(sec or 0)
+    return f"{sec // 60} мин {sec % 60:02d} с" if sec >= 60 else f"{sec} с"
 
 
 def _size(n: int | float | None) -> str:

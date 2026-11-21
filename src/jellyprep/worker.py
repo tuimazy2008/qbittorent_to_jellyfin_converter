@@ -22,6 +22,7 @@ from .db import APPROVED, DB, DONE, ERROR, NEW, REMOVED, REVIEW, RUNNING, SKIPPE
 log = logging.getLogger("jellyprep")
 
 KIND_HINT = {"movies": "movie", "tv": "tv", "auto": "auto"}
+LLM_THINKING = "модель думает…"
 INFO_PROBLEMS = ("Серии сопоставлены по названиям", "Сквозная нумерация")
 
 
@@ -107,8 +108,8 @@ class Worker:
         self.status: dict = {"last_run": None, "last_error": None, "running": False, "job": None,
                              "job_started": None}
         self._downloads: tuple[float, list[dict]] = (0.0, [])
-        self._llm_busy: set[int] = set()
         self._llm_lock = threading.Lock()
+        self.llm_jobs: dict[int, llm.Conversation] = {}   # running conversations, for the board and cancel
 
     # --- threads ----------------------------------------------------------
     def start(self) -> None:
@@ -122,6 +123,9 @@ class Worker:
 
     def recover(self) -> None:
         """After a restart, jobs that were running go back to the queue; half-written files are removed."""
+        for item in self.db.query("SELECT id FROM items WHERE note=?", (LLM_THINKING,)):
+            self.db.execute("UPDATE items SET note=? WHERE id=?",
+                            ("модель: запрос прерван перезапуском сервиса", item["id"]))
         for item in self.db.items(RUNNING):
             for a in (item.get("plan") or {}).get("actions", []):
                 Path(a["dst"]).with_name(Path(a["dst"]).stem + ".partial.mkv").unlink(missing_ok=True)
@@ -299,17 +303,30 @@ class Worker:
 
     def ask_llm(self, item_id: int, auto: bool = False, wait: bool = False) -> None:
         """Ask the local model to identify the item (in the background). Its answer waits for confirmation."""
+        s = config.load(self.db)
         with self._llm_lock:
-            if item_id in self._llm_busy:
+            if item_id in self.llm_jobs:
                 return
-            self._llm_busy.add(item_id)
-        self.db.execute("UPDATE items SET note=? WHERE id=?", ("модель думает…", item_id))
+            self.llm_jobs[item_id] = llm.Conversation(model=s.get("llm_model") or "", prompt="")
+        self.db.execute("UPDATE items SET note=? WHERE id=?", (LLM_THINKING, item_id))
         t = threading.Thread(target=self._ask_llm, args=(item_id, auto), daemon=True, name=f"llm-{item_id}")
         t.start()
         if wait:
             t.join()
 
+    def cancel_llm(self, item_id: int) -> None:
+        conv = self.llm_jobs.get(item_id)
+        if conv:
+            conv.cancel.set()
+        elif (self.db.item(item_id) or {}).get("note") == LLM_THINKING:   # stale label
+            self.db.execute("UPDATE items SET note=NULL WHERE id=?", (item_id,))
+
+    def _save_conversation(self, item_id: int, conv: llm.Conversation) -> None:
+        old = (self.db.item(item_id).get("trace") or {}).get("llm_log") or []
+        self.db.trace(item_id, llm_log=([conv.as_dict()] + old)[:5])
+
     def _ask_llm(self, item_id: int, auto: bool) -> None:
+        conv = self.llm_jobs[item_id]
         try:
             s = config.load(self.db)
             item = self.db.item(item_id)
@@ -324,19 +341,24 @@ class Worker:
             tmdb = tmdb_client(s)
             seasons = {e["season"] for e in ident.get("episodes") or []}
             titles = llm.episode_titles_for(tmdb, cands, seasons) if ident.get("kind") != "movie" else {}
-            prompt = llm.build_prompt(item["name"], sc.videos, ident.get("kind", ""), cands, titles)
+            conv.prompt = llm.build_prompt(item["name"], sc.videos, ident.get("kind", ""), cands, titles)
+            conv.model = s["llm_model"]
             started = time.time()
-            answer = llm.ask(s, prompt)
+            answer = llm.ask(s, conv.prompt, conv)
             overrides, comment = llm.to_overrides(answer, sc.videos, {c["id"] for c in cands})
         except (llm.LLMError, OSError) as e:
             offline = "недоступна" in str(e)
+            if conv.status == "running":
+                conv.status, conv.error, conv.finished = "error", str(e), time.time()
+            self._save_conversation(item_id, conv)
             self.db.execute("UPDATE items SET note=? WHERE id=?", (f"модель: {e}", item_id))
             self.db.trace(item_id, llm_tried=True, llm_pending=bool(auto and offline))
             self.db.log(f"Модель: {e}", "warning", item_id)
             return
         finally:
             with self._llm_lock:
-                self._llm_busy.discard(item_id)
+                self.llm_jobs.pop(item_id, None)
+        self._save_conversation(item_id, conv)
         self.db.trace(item_id, llm_tried=True, llm_pending=False, llm_comment=comment,
                       llm_seconds=round(time.time() - started))
         self.analyze(item_id, overrides)

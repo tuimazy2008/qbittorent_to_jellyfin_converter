@@ -54,7 +54,7 @@ def title_of(item: dict) -> tuple[str, str]:
 
 
 def item_row(item: dict, s: dict, cat: dict | None, logs: list[dict], queue_ahead: int, job: dict | None,
-             job_started: float | None = None) -> dict[str, Any]:
+             job_started: float | None = None, conv: Any = None) -> dict[str, Any]:
     p = pipeline.build(item, s, cat, logs, queue_ahead, job)
     st = {x["key"]: x for x in p["stages"]}
     state = item["state"]
@@ -78,8 +78,16 @@ def item_row(item: dict, s: dict, cat: dict | None, logs: list[dict], queue_ahea
         line = "нужно решение: " + (problems[0] if problems else (item.get("trace") or {}).get("decision") or "проверьте распознавание")
         if (item.get("note") or "").startswith(("модель", "предложение модели")):
             icon, line = "🤖", item["note"]
+        if conv is not None:
+            took = time.time() - conv.started
+            line = (f"модель {conv.model} думает {_mmss(took)}"
+                    + (f" · получено фрагментов ответа: {conv.chunks}" if conv.chunks else " · читает вопрос"))
         actions.append({"label": "Открыть", "open": True})
-        if llm.configured(s) and item.get("note") != "модель думает…":
+        if conv is not None:
+            actions.append({"label": "Отменить", "post": f"/items/{item['id']}/llm-cancel"})
+        elif item.get("note") == w.LLM_THINKING:
+            actions.append({"label": "Сбросить", "post": f"/items/{item['id']}/llm-cancel"})
+        elif llm.configured(s):
             actions.append({"label": "Спросить модель", "post": f"/items/{item['id']}/ask-llm"})
         if (item.get("plan") or {}).get("actions"):
             actions.append({"label": "Подтвердить", "post": f"/items/{item['id']}/approve"})
@@ -118,6 +126,11 @@ def item_row(item: dict, s: dict, cat: dict | None, logs: list[dict], queue_ahea
             "updated": item.get("updated_at") or item["created_at"]}
 
 
+def _mmss(sec: float) -> str:
+    sec = int(sec)
+    return f"{sec // 60} мин {sec % 60:02d} с" if sec >= 60 else f"{sec} с"
+
+
 def _seed_eta(cat: dict | None, item: dict) -> str:
     if not cat or not cat.get("delete_enabled") or not cat.get("seed_days"):
         return ""
@@ -142,9 +155,9 @@ def download_row(t: dict) -> dict[str, Any]:
 
 
 def build(items: list[dict], downloads: list[dict], s: dict, cats: dict, logs_for, ahead: dict, job: dict | None,
-          job_started: float | None) -> dict[str, Any]:
-    rows = [item_row(i, s, cats.get(i["category"]), logs_for(i["id"]), ahead.get(i["id"], 0), job, job_started)
-            for i in items]
+          job_started: float | None, llm_jobs: dict | None = None) -> dict[str, Any]:
+    rows = [item_row(i, s, cats.get(i["category"]), logs_for(i["id"]), ahead.get(i["id"], 0), job, job_started,
+                     (llm_jobs or {}).get(i["id"])) for i in items]
     rows += [download_row(t) for t in downloads]
     order = {"⚙": 0, "↓": 1, "⏸": 2, "…": 3}
     groups = []

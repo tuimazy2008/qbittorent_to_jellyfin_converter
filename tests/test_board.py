@@ -61,3 +61,16 @@ def test_download_row_and_grouping():
     assert dl["icon"] == "↓" and dl["cells"][0] == {"status": "current", "progress": 0.63} and "12 мин" in dl["line"]
     assert len(groups["decision"]["rows"]) == 1 and groups["done"]["collapsed"]
     assert b["counts"] == [1, 1, 0, 0, 0]
+
+
+def test_thinking_model_line_and_cancel():
+    from jellyprep import llm
+    conv = llm.Conversation(model="google/gemma-4-12b-qat", prompt="p")
+    conv.started -= 100
+    conv.chunks = 1234
+    it = item("review", note="модель думает…")
+    r = board.item_row(it, {**S, "llm_kind": "openai", "llm_url": "u", "llm_model": "m"}, CAT, [], 0, None, None, conv)
+    assert "думает 1 мин 40 с" in r["line"] and "1234" in r["line"]
+    assert any(a.get("post", "").endswith("/llm-cancel") and a["label"] == "Отменить" for a in r["actions"])
+    stale = board.item_row(it, {**S, "llm_kind": "openai", "llm_url": "u", "llm_model": "m"}, CAT, [], 0, None, None, None)
+    assert any(a["label"] == "Сбросить" for a in stale["actions"])
