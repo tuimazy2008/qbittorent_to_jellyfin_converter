@@ -326,6 +326,25 @@ class FFmpegError(RuntimeError):
     pass
 
 
+def check_size(info: dict, s: dict, transcode: bool, out_size: int) -> None:
+    """A half-downloaded source (zeros inside) can still have the right duration in its header.
+
+    When only audio/subtitles change, the video is copied, so the result can't be much smaller than the
+    video stream itself; a re-encode can't be a tiny fraction of the bitrate it was given.
+    """
+    v, dur = info.get("video") or {}, info.get("duration") or 0
+    if transcode:
+        expected = estimate_bytes(info, s, True)
+        if expected and out_size < 0.15 * expected:
+            raise FFmpegError(f"результат подозрительно мал ({out_size / 1e6:.0f} МБ при ожидаемых "
+                              f"~{expected / 1e6:.0f} МБ) — похоже, исходник повреждён; оригинал оставлен")
+    elif v.get("bps") and dur:
+        video_bytes = v["bps"] * dur / 8
+        if out_size < 0.5 * video_bytes:
+            raise FFmpegError(f"результат подозрительно мал ({out_size / 1e6:.0f} МБ, только видео в исходнике "
+                              f"~{video_bytes / 1e6:.0f} МБ) — похоже, исходник недокачан; оригинал оставлен")
+
+
 def run(cmd: list[str], duration: float, progress: Callable[[float, str], None] | None = None) -> None:
     with tempfile.TemporaryFile(mode="w+") as err:
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err, text=True)
@@ -369,6 +388,7 @@ def process(src: str, dst: str, info: dict, s: dict, *, transcode: bool,
         d_src, d_dst = info.get("duration") or 0, media.duration(partial)
         if d_src and abs(d_src - d_dst) > 2:
             raise FFmpegError(f"длительность не совпадает: {d_src:.0f} c → {d_dst:.0f} c")
+        check_size(info, s, transcode, os.path.getsize(partial))
         os.replace(partial, dst)
     finally:
         partial.unlink(missing_ok=True)

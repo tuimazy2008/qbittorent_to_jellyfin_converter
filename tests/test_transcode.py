@@ -210,3 +210,25 @@ def test_inplace_rerun_skips_finished_files(tmp_path):
                                                    "type": "video", "size": f.stat().st_size, "info": info}]}
     res = executor.execute(plan, log=lambda m: None, settings=S)
     assert res[0]["method"] == "exists"                                  # second run (after a restart) skips it
+
+
+def test_size_check_catches_half_downloaded_sources():
+    info = fake_info(mbps=4, duration=1473)          # ~740 MB of video
+    with pytest.raises(transcode.FFmpegError, match="недокачан"):
+        transcode.check_size(info, S, False, 7_000_000)
+    transcode.check_size(info, S, False, 760_000_000)  # normal: video copied + voice track
+    with pytest.raises(transcode.FFmpegError, match="повреждён"):
+        transcode.check_size(fake_info(3840, 2160, mbps=20), S, True, 5_000_000)
+    transcode.check_size(fake_info(3840, 2160, mbps=20), S, True, 5_000_000_000)
+
+
+@needs_ffmpeg
+def test_real_truncated_source_keeps_original(tmp_path):
+    src = tmp_path / "ep.mkv"
+    make_clip(src, 640, 360, seconds=4)
+    info = transcode.probe(src)
+    info["video"]["bps"] = 50_000_000                # pretend the header promised much more video
+    before = src.read_bytes()
+    with pytest.raises(transcode.FFmpegError):
+        transcode.process(str(src), str(src), info, S, transcode=False)
+    assert src.read_bytes() == before and not (tmp_path / "ep.partial.mkv").exists()
