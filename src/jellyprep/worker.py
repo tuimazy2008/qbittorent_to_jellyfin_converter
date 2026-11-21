@@ -103,7 +103,9 @@ class Worker:
         self._wake = threading.Event()
         self._enc_wake = threading.Event()
         self._lock = threading.Lock()
-        self.status: dict = {"last_run": None, "last_error": None, "running": False, "job": None}
+        self.status: dict = {"last_run": None, "last_error": None, "running": False, "job": None,
+                             "job_started": None}
+        self._downloads: tuple[float, list[dict]] = (0.0, [])
 
     # --- threads ----------------------------------------------------------
     def start(self) -> None:
@@ -193,6 +195,21 @@ class Worker:
             return True
         return False
 
+    def downloads(self) -> list[dict]:
+        """Torrents still downloading in enabled categories (cached for a few seconds)."""
+        ts, cached = self._downloads
+        if time.time() - ts < 5:
+            return cached
+        s = config.load(self.db)
+        enabled = {n for n, c in self.db.categories().items() if c["enabled"]}
+        try:
+            out = [t for t in qbit_client(s).torrents()
+                   if t.get("category") in enabled and not is_complete(t) and t.get("progress", 0) < 1]
+        except Exception:  # noqa: BLE001 — the board must render without qBittorrent
+            out = cached
+        self._downloads = (time.time(), out)
+        return out
+
     # --- steps ----------------------------------------------------------
     def sync(self, s: dict, torrents: dict[str, dict]) -> None:
         cats = self.db.categories()
@@ -278,10 +295,19 @@ class Worker:
         plan = item["plan"]
 
         def progress(n, total, name, frac, speed):
+            overall = ((n - 1) + frac) / max(total, 1)
+            prev = self.status.get("job") or {}
+            # files finished before a restart are skipped without progress reports, so the first report
+            # of this run marks where real work started: the ETA is based on progress since then
+            first = prev.get("item_id") != item_id
             self.status["job"] = {"item_id": item_id, "name": item["name"], "file": name, "n": n,
-                                  "total": total, "percent": round(frac * 100, 1), "speed": speed}
+                                  "total": total, "percent": round(frac * 100, 1), "speed": speed,
+                                  "overall": overall,
+                                  "frac0": overall if first else prev["frac0"],
+                                  "since": time.time() if first else prev["since"]}
 
         self.db.trace(item_id, started_at=time.time())
+        self.status["job_started"] = time.time()
         try:
             executor.check_space(plan, s["min_free_gb"], s["link_fallback"])
             results = executor.execute(plan, s["link_fallback"], log=lambda m: self.db.log(m, item_id=item_id),
@@ -300,6 +326,7 @@ class Worker:
             return False
         finally:
             self.status["job"] = None
+            self.status["job_started"] = None
         failed = [r for r in results if r["method"] == "failed"]
         note = (f"не обработано файлов: {len(failed)} (оставлены как были): "
                 + ", ".join(Path(r["src"]).name for r in failed[:3]) + (" …" if len(failed) > 3 else "")) if failed else None

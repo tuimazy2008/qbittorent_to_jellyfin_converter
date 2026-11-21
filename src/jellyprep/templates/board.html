@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Задачи · jellyprep{% endblock %}
+{% block content %}
+{% if b.dry_run %}<p class="banner warn">Режим dry-run: jellyprep показывает, что сделал бы, но ничего не меняет.
+  Выключается в <a href="/settings">настройках</a>.</p>{% endif %}
+<div id="board" class="board" data-stages='{{ b.stages|tojson }}'></div>
+<noscript><p class="banner warn">Для доски нужен JavaScript. Список задач без него: <a href="/log">журнал</a>.</p></noscript>
+<script id="board-data" type="application/json">{{ b|tojson }}</script>
+<script src="/static/board.js" defer></script>
+{% endblock %}

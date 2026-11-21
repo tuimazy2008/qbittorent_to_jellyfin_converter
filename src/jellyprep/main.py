@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from . import config, pipeline, transcode, worker as worker_mod
+from . import board, config, pipeline, transcode, worker as worker_mod
 from .clients import ClientError, Jellyfin, TMDB, llm_models
 from .db import APPROVED, DB, DONE, ERROR, NEW, REMOVED, REVIEW, RUNNING, SKIPPED
 from .media import free_bytes
@@ -80,49 +80,70 @@ def create_app(db: DB | None = None, start_worker: bool = True) -> FastAPI:
     def index():
         return back("/items" if config.load(db)["setup_done"] else "/setup/qbit")
 
-    @app.get("/items", response_class=HTMLResponse)
-    def items(request: Request, state: str = ""):
-        rows = db.items(state or None)
+    def board_data() -> dict:
         s = config.load(db)
-        cats = db.categories()
-        ahead = _queue_positions(db)
-        for r in rows:
-            r["due"] = worker_mod.deletion_due(cats.get(r["category"]), r["ratio"] or 0, r["seeding_time"] or 0)
-            r["pipe"] = pipeline.build(r, s, cats.get(r["category"]), db.logs(r["id"], limit=50),
-                                       ahead.get(r["id"], 0), worker.status.get("job"))
-        return render(request, "items.html", rows=rows, state=state, dry_run=s["dry_run"])
+        return board.build(db.items(), worker.downloads(), s, db.categories(), lambda i: db.logs(i, limit=50),
+                           _queue_positions(db), worker.status.get("job"), worker.status.get("job_started"))
+
+    @app.get("/items", response_class=HTMLResponse)
+    def items(request: Request):
+        return render(request, "board.html", b=board_data())
+
+    @app.get("/api/board")
+    def api_board():
+        return board_data()
+
+    @app.get("/items/{item_id}/panel", response_class=HTMLResponse)
+    def item_panel(request: Request, item_id: int):
+        ctx = _item_context(item_id)
+        if ctx is None:
+            return HTMLResponse("<p class='muted'>Задача не найдена</p>", status_code=404)
+        return render(request, "_item_panel.html", **ctx)
 
     @app.get("/items/{item_id}", response_class=HTMLResponse)
     def item_page(request: Request, item_id: int):
+        ctx = _item_context(item_id)
+        if ctx is None:
+            return back("/items")
+        return render(request, "item.html", **ctx)
+
+    def _item_context(item_id: int) -> dict | None:
         item = db.item(item_id)
         if not item:
-            return back("/items")
+            return None
         cat = db.categories().get(item["category"])
         due = worker_mod.deletion_due(cat, item["ratio"] or 0, item["seeding_time"] or 0)
         logs = db.logs(item_id)
         pipe = pipeline.build(item, config.load(db), cat, logs, _queue_positions(db).get(item_id, 0),
                               worker.status.get("job"))
-        return render(request, "item.html", item=item, cat=cat, due=due, logs=logs, pipe=pipe)
+        return {"item": item, "cat": cat, "due": due, "logs": logs, "pipe": pipe}
+
+    def back_item(request: Request, item_id: int) -> RedirectResponse:
+        """After an action, return to the board (with the row open) if that's where it came from."""
+        ref = urlparse(request.headers.get("referer") or "")
+        if ref.path in ("/items", "/"):
+            return back(f"/items#item-{item_id}")
+        return back(f"/items/{item_id}")
 
     @app.post("/items/{item_id}/approve")
-    def item_approve(item_id: int):
+    def item_approve(request: Request, item_id: int):
         worker.approve(item_id)
-        return back(f"/items/{item_id}")
+        return back_item(request, item_id)
 
     @app.post("/items/{item_id}/run-now")
-    def item_run_now(item_id: int):
+    def item_run_now(request: Request, item_id: int):
         worker.approve(item_id, run_now=True)
-        return back(f"/items/{item_id}")
+        return back_item(request, item_id)
 
     @app.post("/items/{item_id}/skip")
-    def item_skip(item_id: int):
+    def item_skip(request: Request, item_id: int):
         worker.skip(item_id)
-        return back(f"/items/{item_id}")
+        return back_item(request, item_id)
 
     @app.post("/items/{item_id}/reanalyze")
-    def item_reanalyze(item_id: int):
+    def item_reanalyze(request: Request, item_id: int):
         worker.analyze(item_id, overrides={})
-        return back(f"/items/{item_id}")
+        return back_item(request, item_id)
 
     @app.post("/items/{item_id}/override")
     async def item_override(request: Request, item_id: int):
@@ -131,7 +152,7 @@ def create_app(db: DB | None = None, start_worker: bool = True) -> FastAPI:
         if not item or not item.get("ident"):
             return back(f"/items/{item_id}")
         worker.analyze(item_id, overrides=_overrides_from_form(form, item["ident"]))
-        return back(f"/items/{item_id}")
+        return back_item(request, item_id)
 
     @app.get("/categories", response_class=HTMLResponse)
     def categories_page(request: Request):

@@ -113,3 +113,41 @@ tr.warnrow td { background: var(--warn-bg); }
 .ps-line { font-size: 0.92rem; word-break: break-word; }
 .act-hardlink, .act-exists { color: var(--muted); } .act-copy { background: var(--warn-bg); color: var(--warn); }
 .act-failed { background: var(--bad-bg); color: var(--bad); }
+
+/* board */
+.board { margin-top: 4px; }
+.brow-grid { display: grid; grid-template-columns: minmax(200px, 1.4fr) repeat(5, minmax(60px, 1fr)); gap: 6px; align-items: center; }
+.bhead { position: sticky; top: 0; z-index: 2; background: var(--bg); padding: 8px 0; border-bottom: 1px solid var(--line); }
+.bstage { font-size: 0.82rem; font-weight: 600; color: var(--muted); text-align: center; }
+.bgroup { margin-top: 18px; }
+.bgroup-h { font-size: 1rem; margin: 0 0 6px; cursor: default; }
+.bgroup-h[data-collapse]:not([data-collapse=""]) { cursor: pointer; }
+.small { font-size: 0.8rem; }
+.brow { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
+.brow > .brow-grid { cursor: pointer; }
+.brow.g-decision { border-left: 4px solid var(--warn); }
+.btitle { min-width: 0; } .btitle b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btitle small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cell { display: block; height: 12px; border-radius: 3px; background: var(--line); overflow: hidden; position: relative; }
+.cell i { display: block; height: 100%; }
+.c-done i { background: var(--ok); width: 100% !important; }
+.c-current i { background: var(--accent); transition: width 1s linear; }
+.c-current { box-shadow: 0 0 0 2px var(--card-sel); }
+.c-wait { background: repeating-linear-gradient(45deg, var(--warn-bg), var(--warn-bg) 4px, transparent 4px, transparent 8px), var(--line); outline: 1px solid var(--warn); }
+.c-wait i { background: var(--warn); opacity: 0.6; }
+.c-error { background: var(--bad); } .c-error i { display: none; }
+.c-skip { background: transparent; border: 1px dashed var(--line); }
+.c-todo i { display: none; }
+.bline { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; margin-top: 6px; font-size: 0.9rem; }
+.bicon { width: 1.2em; text-align: center; flex: none; }
+.btext { flex: 1 1 260px; min-width: 0; word-break: break-word; }
+.g-decision .btext { color: var(--warn); }
+.bacts { display: flex; gap: 6px; flex: none; }
+.bpanel { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 4px; cursor: auto; }
+.bpanel h2 { font-size: 1rem; } .bpanel h3 { font-size: 0.95rem; }
+@media (max-width: 700px) {
+  .brow-grid { grid-template-columns: repeat(5, 1fr); }
+  .brow-grid .btitle { grid-column: 1 / -1; }
+  .bhead .btitle { display: none; }
+  .bstage { font-size: 0.7rem; word-break: break-word; }
+}

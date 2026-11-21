@@ -92,6 +92,12 @@ def test_pages_render_pipeline(db):
     db.trace(item_id, decision="уверенность 92%", approved_by="auto")
     db.upsert_category("movies", enabled=1, delete_enabled=1, seed_ratio=2.0, seed_days=30.0)
     with TestClient(main.create_app(db, start_worker=False), base_url="http://jp.test") as c:
-        assert "pipe-strip" in c.get("/items").text
+        assert "board-data" in c.get("/items").text
+        rows = [r for g in c.get("/api/board").json()["groups"] for r in g["rows"]]
+        assert rows[0]["id"] == item_id and len(rows[0]["cells"]) == 5
         page = c.get(f"/items/{item_id}").text
         assert "Путь задачи" in page and "подтверждено автоматически" in page
+        panel = c.get(f"/items/{item_id}/panel").text
+        assert "Путь задачи" in panel and "<html" not in panel
+        r = c.post(f"/items/{item_id}/skip", headers={"Referer": "http://jp.test/items"}, follow_redirects=False)
+        assert r.headers["location"] == f"/items#item-{item_id}"
