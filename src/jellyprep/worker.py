@@ -30,6 +30,41 @@ FRAMES_DIR = config.CONFIG_DIR / "frames"
 CATEGORY_PROBLEM = "Категория"
 
 
+def _show_is_weak(ident: dict) -> bool:
+    """Nobody really knows which show this is (generic folder name, no year and several matches, …)."""
+    chosen = (ident.get("show") or {}).get("chosen") or {}
+    weak = (identify.SHOW_UNKNOWN_PROBLEM, identify.NO_YEAR_PROBLEM, "В TMDB у сериала нет сезона")
+    return not chosen.get("id") or any(p.startswith(weak) for p in ident.get("problems") or [])
+
+
+STUDIO_WORDS = re.compile(r"(?i)pictures|entertainment|production|productions|films?|studios?|fox|warner|universal|"
+                          r"paramount|columbia|metro|disney|dreamworks|miramax|lionsgate|regency|мосфильм|ленфильм|"
+                          r"ств|киностудия|кинокомпания")
+
+
+def _by_studios(tmdb: TMDB, credits: list[str], year: int | None) -> list:
+    """Films of the studios read in the credits ("20th Century Fox", "Davis Entertainment") released that year."""
+    ids: list[int] = []
+    for line in credits:
+        if not STUDIO_WORDS.search(line):
+            continue
+        for part in re.split(r"[/,]| A | AN ", line):
+            name = re.sub(r"(?i)\b(a|an|the|presents?|in association with|production|productions|company)\b", " ", part)
+            name = " ".join(name.split())
+            if len(name) >= 4:
+                try:
+                    ids += tmdb.companies(name)
+                except ClientError:
+                    pass
+    ids = list(dict.fromkeys(ids))[:6]
+    if not ids:
+        return []
+    try:
+        return tmdb.discover_movies(ids, year)
+    except ClientError:
+        return []
+
+
 def category_hint(kind: str, cat: dict, cats: dict[str, dict]) -> str | None:
     """A series in a films category (or the other way round): which category would fit better."""
     want = {"tv": "tv", "movie": "movies"}.get(kind)
@@ -470,26 +505,45 @@ class Worker:
         seen = llm.ask(s, conv.prompt, conv, images=[f.read_bytes() for f in frames],
                        schema=llm.VISION_SCHEMA, system=llm.VISION_SYSTEM)
         self._save_conversation(item_id, conv)
-        names = [n for n in dict.fromkeys([seen.get("title"), seen.get("original_title")]) if n and n.strip()]
-        year = seen.get("year") if isinstance(seen.get("year"), int) else None
+        screen = [n for n in dict.fromkeys([seen.get("title"), seen.get("original_title")]) if n and n.strip()]
+        guess = (seen.get("title_from_name") or "").strip()
+        names = screen + ([guess] if guess and guess not in screen else [])
+        # a year in the file name is a fact; the model's year may be bent to fit its guess
+        year = parse.guess_title(PurePath(main).name)[1] or (seen.get("year") if isinstance(seen.get("year"), int) else None)
         read = f"на экране: {seen.get('comment') or ', '.join(names)}"
-        if not names:
-            raise llm.LLMError("модель не смогла прочитать название на кадрах: " + (seen.get("comment") or ""))
         found: dict[int, Any] = {}
         if tmdb is not None:
             for n in names:
                 for c in tmdb.search("movie", n, year) + tmdb.search("movie", n):
                     found.setdefault(c.id, c)
+            if year:   # films of the studios read in the credits, that year
+                for c in _by_studios(tmdb, seen.get("credits") or [], year):
+                    found.setdefault(c.id, c)
+        if year:       # a year read on screen rules out candidates from other years (models invent titles)
+            found = {k: c for k, c in found.items() if not c.year or abs(c.year - year) <= 1}
+        skel = parse.disemvoweled(PurePath(main).name)
+        if skel:       # "LF_R_SMTHNG_LK_T": no model needed if exactly one candidate has these consonants
+            same = [c for c in found.values()
+                    if parse.skeleton(skel) in (parse.skeleton(c.original_title), parse.skeleton(c.title))]
+            if len(same) == 1:
+                return ({"kind": "movie", "hints": [same[0].original_title],
+                         "movies": {"0": {"tmdb_id": same[0].id}}},
+                        f"решено без модели: имя файла без гласных совпадает с «{same[0].original_title}» "
+                        f"({same[0].year}), а в титрах — студии этого фильма. Модель видела: "
+                        f"{seen.get('comment') or '—'}")
+        if not names and not found:
+            raise llm.LLMError("модель не смогла прочитать название на кадрах: " + (seen.get("comment") or ""))
+        studio_hits = not screen or not any(identify.score(screen, year, c) >= 0.6 for c in found.values())
         ranked = sorted(found.values(), key=lambda c: identify.score(names, year, c), reverse=True)
-        ranked = [c for c in ranked if identify.score(names, year, c) >= 0.6][:6]
+        ranked = ranked[:6] if studio_hits else [c for c in ranked if identify.score(names, year, c) >= 0.6][:6]
         overrides = {"kind": "movie", "hints": names}
-        manual = {"title": names[0], "year": year}
+        manual = {"title": screen[0], "year": year} if screen else {}   # never a decoded guess as a title
         if not ranked:
             overrides["movies"] = {"0": manual}
             return overrides, f"{read}; в TMDB такого не нашлось"
         best = identify.score(names, year, ranked[0])
         second = identify.score(names, year, ranked[1]) if len(ranked) > 1 else 0
-        if len(ranked) == 1 or (year and best >= 0.95 and second < best - 0.1):
+        if not studio_hits and (len(ranked) == 1 or (year and best >= 0.95 and second < best - 0.1)):
             overrides["movies"] = {"0": {"tmdb_id": ranked[0].id}}
             return overrides, f"{read}; в TMDB это «{ranked[0].title}» ({ranked[0].year})"
         cards = [tmdb.movie_card(c.id) for c in ranked]
@@ -500,6 +554,59 @@ class Worker:
         pick = llm.ask(s, step2.prompt, step2, schema=llm.CHOOSE_SCHEMA, system=llm.CHOOSE_SYSTEM)
         tid = pick.get("tmdb_id")
         overrides["movies"] = {"0": {"tmdb_id": tid} if tid in {c["id"] for c in cards} else manual}
+        return overrides, f"{read}; {pick.get('comment') or ''}".strip("; ")
+
+    def _show_by_frames(self, item_id: int, item: dict, sc: media.Scan, s: dict, tmdb: TMDB | None,
+                        conv: llm.Conversation) -> tuple[dict, str]:
+        """Same two steps for a series nobody could name ("Season 01/S01E01 - The Pants Tent.mkv"):
+        A) read the opening of the first episode, B) pick among TMDB shows by their cards."""
+        files = sorted(sc.videos)
+        first = files[0]
+        info = self.probe_cached(sc.base / first) or {}
+        duration = info.get("duration") or 0
+        frames = media.extract_frames(sc.base / first, duration, FRAMES_DIR / str(item_id))
+        if not frames:
+            raise llm.LLMError("не удалось вырезать кадры из файла")
+        names_list = [PurePath(f).name for f in files]
+        conv.images = [f.name for f in frames]
+        conv.prompt = (f"One episode of a TV series: «{PurePath(first).name}», {int(duration // 60)} min. "
+                       f"All episode files: {'; '.join(names_list[:15])}. Folder: «{sc.name}». "
+                       f"{len(frames)} frames attached: opening, middle, end credits.")
+        seen = llm.ask(s, conv.prompt, conv, images=[f.read_bytes() for f in frames],
+                       schema=llm.VISION_SCHEMA, system=llm.VISION_SYSTEM)
+        self._save_conversation(item_id, conv)
+        episode_titles = {parse._norm(re.sub(r"(?i)^s\d+e\d+\W*", "", PurePath(f).stem)) for f in files}
+        names = [n for n in dict.fromkeys([seen.get("title"), seen.get("original_title"),
+                                            seen.get("title_from_name")])
+                 if n and n.strip() and parse._norm(n) not in episode_titles]   # an episode title isn't the show
+        year = seen.get("year") if isinstance(seen.get("year"), int) else None
+        read = f"на экране: {seen.get('comment') or ', '.join(names)}"
+        if not names:
+            raise llm.LLMError("модель не узнала сериал (назвала только серию). Укажите сериал вручную")
+        found: dict[int, Any] = {}
+        if tmdb is not None:
+            for n in names:
+                for c in tmdb.search("tv", n, year) + tmdb.search("tv", n):
+                    found.setdefault(c.id, c)
+        ranked = sorted(found.values(), key=lambda c: identify.score(names, year, c), reverse=True)
+        ranked = [c for c in ranked if identify.score(names, year, c) >= 0.6][:6]
+        overrides = {"kind": "tv", "hints": names}
+        if not ranked:
+            raise llm.LLMError(f"модель назвала «{names[0]}», но в TMDB такого сериала нет — похоже, выдумала. "
+                               f"Укажите сериал вручную")
+        if len(ranked) == 1 and identify.score(names, year, ranked[0]) >= 0.9:
+            overrides["show"] = {"tmdb_id": ranked[0].id}
+            return overrides, f"{read}; в TMDB это «{ranked[0].title}» ({ranked[0].year})"
+        cards = [tmdb.tv_card(c.id) for c in ranked]
+        step2 = llm.Conversation(model=s["llm_model"], prompt=llm.build_choose_prompt(
+            PurePath(first).name, duration, seen, cards, names_list), status="running")
+        with self._llm_lock:
+            self.llm_jobs[item_id] = step2
+        pick = llm.ask(s, step2.prompt, step2, schema=llm.CHOOSE_SCHEMA, system=llm.CHOOSE_SYSTEM)
+        tid = pick.get("tmdb_id")
+        if tid not in {c["id"] for c in cards}:
+            raise llm.LLMError("модель не уверена, какой это сериал. Укажите сериал вручную: " + (pick.get("comment") or ""))
+        overrides["show"] = {"tmdb_id": tid}
         return overrides, f"{read}; {pick.get('comment') or ''}".strip("; ")
 
     @staticmethod
@@ -571,6 +678,9 @@ class Worker:
             started = time.time()
             if ident.get("kind") == "movie" and len(ident.get("movies") or []) == 1 and llm.supports_vision(s):
                 overrides, comment = self._movie_by_frames(item_id, item, sc, s, tmdb, conv)
+                conv = self.llm_jobs.get(item_id, conv)
+            elif ident.get("kind") == "tv" and _show_is_weak(ident) and llm.supports_vision(s):
+                overrides, comment = self._show_by_frames(item_id, item, sc, s, tmdb, conv)
                 conv = self.llm_jobs.get(item_id, conv)
             else:
                 images = self._frames_for(item_id, ident, sc, s, conv)

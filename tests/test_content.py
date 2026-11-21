@@ -159,3 +159,134 @@ def test_frame_route(db, tmp_path, monkeypatch):
     with TestClient(main.create_app(db, start_worker=False), base_url="http://jp.test") as c:
         assert c.get("/items/7/frames/f_000020.jpg").content == b"\xff\xd8"
         assert c.get("/items/7/frames/..%2F..%2Fsecret").status_code in (400, 404)
+
+
+def test_generic_folder_name_is_not_a_title(tmp_path, tmdb):
+    from jellyprep import parse
+    assert parse.is_generic_name("Season 01") and parse.is_generic_name("Сезон 2") and parse.is_generic_name("S03")
+    assert not parse.is_generic_name("Тайны следствия") and not parse.is_generic_name("Severance (Season 1) BDRip")
+    root = tmp_path / "series" / "Season 01"
+    for name in ("S01E01 - The Pants Tent.mkv", "S01E02 - Ted And Mary.mkv"):
+        make_file(root / name)
+    ident = identify.identify(media.scan(root), "tv", tmdb)
+    assert any(p.startswith(identify.SHOW_UNKNOWN_PROBLEM) for p in ident["problems"])
+    assert worker_mod._show_is_weak(ident)
+
+
+def test_series_by_frames(db, tmp_path, monkeypatch, tmdb):
+    tmdb.tv += [Candidate(4546, "Умерь свой энтузиазм", "Curb Your Enthusiasm", 2000, 30)]
+    tmdb.seasons[4546] = {1: 10}
+    root = tmp_path / "media" / "Season 01"
+    for name in ("S01E01 - The Pants Tent.mkv", "S01E02 - Ted And Mary.mkv"):
+        make_file(root / name)
+    monkeypatch.setattr(worker_mod, "tmdb_client", lambda s: tmdb)
+    monkeypatch.setattr(worker_mod, "safe_probe", lambda p: fake_info(duration=1700, audio=(("eng", 2),)))
+    monkeypatch.setattr(llm, "supports_vision", lambda s: True)
+    monkeypatch.setattr(worker_mod, "FRAMES_DIR", tmp_path / "frames")
+
+    def frames(path, duration, out_dir, width=768):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "f_000045.jpg").write_bytes(b"j")
+        return [out_dir / "f_000045.jpg"]
+
+    monkeypatch.setattr(media, "extract_frames", frames)
+    prompts = []
+
+    def fake_ask(s, prompt, conv=None, images=None, schema=None, system=None):
+        conv.status, conv.system = "ok", system or llm.SYSTEM
+        prompts.append(prompt)
+        return {"title": "Curb Your Enthusiasm", "original_title": "", "title_from_name": "", "year": None,
+                "credits": ["HBO"], "comment": "заставка «Curb Your Enthusiasm»"}
+
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    config.save(db, {"llm_kind": "openai", "llm_url": "http://lm/v1", "llm_model": "m", "llm_auto": False,
+                     "library_root": str(tmp_path / "lib")})
+    db.upsert_category("adult_series", enabled=1, kind="tv", approval="auto_if_confident")
+    item_id = db.add_item(source="folder", name="Season 01", category="adult_series", content_path=str(root))
+    w = worker_mod.Worker(db)
+    w.analyze(item_id)
+    w.ask_llm(item_id, wait=True)
+    item = db.item(item_id)
+    assert "The Pants Tent" in prompts[0]
+    assert item["ident"]["show"]["chosen"]["id"] == 4546
+    assert sorted((e["season"], e["episode"]) for e in item["ident"]["episodes"]) == [(1, 1), (1, 2)]
+
+
+def test_studios_and_year_when_no_title_is_readable(monkeypatch):
+    class T:
+        def companies(self, name):
+            return {"20TH CENTURY FOX": [25], "DAVIS ENTERTAINMENT": [1302], "NEW REGENCY": [508]}.get(name.upper(), [])
+
+        def discover_movies(self, ids, year):
+            assert set(ids) >= {25, 1302} and year == 2002
+            return [Candidate(15357, "Жизнь или что-то вроде того", "Life or Something Like It", 2002, 5)]
+
+    got = worker_mod._by_studios(T(), ["20th CENTURY FOX", "A DAVIS ENTERTAINMENT/NEW REGENCY PRODUCTION", "Carpenters"], 2002)
+    assert [c.id for c in got] == [15357]
+
+
+def test_skeleton_and_disemvoweled_names():
+    from jellyprep import parse
+    assert parse.disemvoweled("LF_R_SMTHNG_LK_T_2002_720p_WEB-DL -BLUEBIRD.mkv") == "LF_R_SMTHNG_LK_T"
+    assert parse.disemvoweled("Love.Actually.2003.mkv") is None
+    assert parse.skeleton("LF_R_SMTHNG_LK_T") == parse.skeleton("Life or Something Like It")
+
+
+def test_disemvoweled_film_found_via_studios_without_trusting_the_model(db, tmp_path, monkeypatch, tmdb):
+    tmdb.movies += [Candidate(87827, "Жизнь Пи", "Life of Pi", 2012, 30),
+                    Candidate(15357, "Жизнь или что-то вроде того", "Life or Something Like It", 2002, 5)]
+    monkeypatch.setattr(worker_mod, "_by_studios", lambda t, credits, year: [
+        Candidate(15357, "Жизнь или что-то вроде того", "Life or Something Like It", 2002, 5),
+        Candidate(1000, "Другой фильм Fox", "Another Fox Film", 2002, 9)])
+    f = make_file(tmp_path / "media" / "LF_R_SMTHNG_LK_T_2002_720p_WEB-DL -BLUEBIRD.mkv")
+    monkeypatch.setattr(worker_mod, "tmdb_client", lambda s: tmdb)
+    monkeypatch.setattr(worker_mod, "safe_probe", lambda p: fake_info(duration=6200))
+    monkeypatch.setattr(llm, "supports_vision", lambda s: True)
+    monkeypatch.setattr(worker_mod, "FRAMES_DIR", tmp_path / "frames")
+    monkeypatch.setattr(media, "extract_frames", lambda p, d, o, width=768: (o.mkdir(parents=True, exist_ok=True),
+                        (o / "f_000020.jpg").write_bytes(b"j"), [o / "f_000020.jpg"])[2])
+
+    def fake_ask(s, prompt, conv=None, images=None, schema=None, system=None):
+        conv.status, conv.system = "ok", system or llm.SYSTEM
+        return {"title": "", "original_title": "", "title_from_name": "Life of Pi", "year": 2012,   # bent to its guess
+                "credits": ["20th CENTURY FOX", "A DAVIS ENTERTAINMENT/NEW REGENCY PRODUCTION"], "comment": "титры Fox"}
+
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    config.save(db, {"llm_kind": "openai", "llm_url": "http://lm/v1", "llm_model": "m", "llm_auto": False,
+                     "library_root": str(tmp_path / "lib")})
+    db.upsert_category("movies", enabled=1, kind="movies")
+    item_id = db.add_item(source="folder", name=f.name, category="movies", content_path=str(f))
+    w = worker_mod.Worker(db)
+    w.analyze(item_id)
+    w.ask_llm(item_id, wait=True)
+    item = db.item(item_id)
+    assert item["ident"]["movies"][0]["chosen"]["id"] == 15357            # not «Жизнь Пи» (2012)
+    assert "без гласных" in item["note"]
+
+
+def test_episode_title_is_not_taken_for_the_show(db, tmp_path, monkeypatch, tmdb):
+    root = tmp_path / "media" / "Season 01"
+    for name in ("S01E01 - The Pants Tent.mkv", "S01E02 - Ted And Mary.mkv"):
+        make_file(root / name)
+    monkeypatch.setattr(worker_mod, "tmdb_client", lambda s: tmdb)
+    monkeypatch.setattr(worker_mod, "safe_probe", lambda p: fake_info(duration=1700, audio=(("eng", 2),)))
+    monkeypatch.setattr(llm, "supports_vision", lambda s: True)
+    monkeypatch.setattr(worker_mod, "FRAMES_DIR", tmp_path / "frames")
+    monkeypatch.setattr(media, "extract_frames", lambda p, d, o, width=768: (o.mkdir(parents=True, exist_ok=True),
+                        (o / "f_000020.jpg").write_bytes(b"j"), [o / "f_000020.jpg"])[2])
+
+    def fake_ask(s, prompt, conv=None, images=None, schema=None, system=None):
+        conv.status, conv.system = "ok", system or llm.SYSTEM
+        return {"title": "The Pants Tent", "original_title": "", "title_from_name": "", "year": None,
+                "credits": [], "comment": "сериал «The Pants Tent»"}
+
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    config.save(db, {"llm_kind": "openai", "llm_url": "http://lm/v1", "llm_model": "m", "llm_auto": False,
+                     "library_root": str(tmp_path / "lib")})
+    db.upsert_category("adult_series", enabled=1, kind="tv")
+    item_id = db.add_item(source="folder", name="Season 01", category="adult_series", content_path=str(root))
+    w = worker_mod.Worker(db)
+    w.analyze(item_id)
+    w.ask_llm(item_id, wait=True)
+    item = db.item(item_id)
+    assert "не узнала сериал" in item["note"] and not (item["ident"]["show"].get("chosen") or {}).get("title") == "The Pants Tent"

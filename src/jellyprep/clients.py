@@ -172,6 +172,29 @@ class TMDB:
                 "countries": [c.get("iso_3166_1") for c in d.get("production_countries") or []][:3],
                 "overview": (d.get("overview") or "")[:240]}
 
+    def tv_card(self, tmdb_id: int) -> dict:
+        d = self._get(f"/tv/{tmdb_id}", language=self.language, append_to_response="credits")
+        cast = (d.get("credits") or {}).get("cast") or []
+        return {"id": d["id"], "title": d.get("name", ""), "original_title": d.get("original_name", ""),
+                "year": _year(d.get("first_air_date")), "last_year": _year(d.get("last_air_date")),
+                "creators": [c["name"] for c in d.get("created_by") or []][:3],
+                "cast": [c["name"] for c in cast[:5]],
+                "networks": [n["name"] for n in d.get("networks") or []][:3],
+                "seasons": d.get("number_of_seasons"), "episodes": d.get("number_of_episodes"),
+                "countries": (d.get("origin_country") or [])[:3], "overview": (d.get("overview") or "")[:240]}
+
+    def companies(self, name: str) -> list[int]:
+        return [c["id"] for c in self._get("/search/company", query=name).get("results", [])[:3]]
+
+    def discover_movies(self, company_ids: list[int], year: int | None) -> list[Candidate]:
+        params = {"with_companies": "|".join(map(str, company_ids)), "language": self.language,
+                  "sort_by": "popularity.desc"}
+        if year:
+            params["primary_release_year"] = year
+        data = self._get("/discover/movie", **params)
+        return [Candidate(r["id"], r.get("title", ""), r.get("original_title", ""), _year(r.get("release_date")),
+                          r.get("popularity", 0.0), r.get("overview", "")) for r in data.get("results", [])[:8]]
+
     def season_episodes(self, tmdb_id: int, season: int) -> list[dict]:
         """[{"episode": 1, "name": "Мягкая лапа смерти. Часть 1"}, ...]"""
         d = self._get(f"/tv/{tmdb_id}/season/{season}", language=self.language)

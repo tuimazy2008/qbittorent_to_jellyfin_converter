@@ -13,6 +13,7 @@ from .clients import TMDB, Candidate, ClientError
 from .media import Scan
 
 NO_TMDB_CONFIDENCE = 0.5
+SHOW_UNKNOWN_PROBLEM = "Название сериала не найдено в именах"
 SERIES_PROBLEM = "Среди фильмов TMDB такого нет, это сериал — проверьте"
 NO_YEAR_PROBLEM = "Нет года в имени, а в TMDB несколько похожих — проверьте"
 
@@ -185,6 +186,10 @@ def identify_movies(s: Scan, tmdb: TMDB | None, overrides: dict, hints: list[str
 def identify_tv(s: Scan, tmdb: TMDB | None, overrides: dict, hints: list[str] | None = None) -> dict:
     problems: list[str] = []
     title, year, alts = parse.guess_title(s.name)
+    generic = parse.is_generic_name(s.name)
+    if generic:   # "Season 01": the folder says nothing about the show; try its parent folder
+        parent = s.root.parent.name if s.root.is_dir() else ""
+        title, year, alts = parse.guess_title(parent) if parent and not parse.is_generic_name(parent) else ("", None, [])
     root_season = parse.season_from_name(s.name)
     sibling_dirs: dict[str, set[str]] = defaultdict(set)
     for v in s.videos:
@@ -224,10 +229,13 @@ def identify_tv(s: Scan, tmdb: TMDB | None, overrides: dict, hints: list[str] | 
 
     base_title = re.sub(r"[\s.:-]*\d+(?:\.\d+)?$", "", title).strip()   # "Пин-код 2" → also "Пин-код"
     # the folder may be named "Neznayka" while the files say "Незнайка на Луне_01-06"
-    file_titles = [parse.guess_title(PurePath(v).name)[0] for v in sorted(s.videos)[:3]]
+    file_titles = [parse.guess_title(PurePath(v).name)[0] for v in sorted(s.videos)[:3]
+                   if parse.parse_episode(PurePath(v).name)[2] not in ("SxxEyy", "NxM")]  # "S01E01 - <episode title>"
     file_titles = [f for f in dict.fromkeys(file_titles) if len(re.sub(r"[\W\d_]", "", f)) >= 4][:2]
     queries = [q for q in dict.fromkeys([title, *alts, base_title, *file_titles,
                                          *(parse.guess_title(h)[0] for h in hints or [])]) if q]
+    if generic and not queries:
+        problems.append(f"{SHOW_UNKNOWN_PROBLEM} (папка «{s.name}»)")
     show = {"guess": {"title": title, "year": year}, **_safe_match(tmdb, "tv", queries, year, problems)}
     _safe_choice(show, tmdb, "tv", overrides.get("show") or _id_in_name(s.name), problems)
     if show["chosen"] is None and tmdb is None and title:

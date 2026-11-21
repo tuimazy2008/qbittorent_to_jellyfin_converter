@@ -167,22 +167,26 @@ def _detect_vision(kind: str, url: str, model: str) -> bool:
         return False
 
 
-VISION_SYSTEM = """You look at frames taken from one film (opening, middle, end credits) to tell which film it is.
-Read the on-screen text exactly: the title card, credits (names, roles), studio, fund and channel logos.
-Report what you READ, not what you guess. If the title isn't readable, leave "title" empty.
-Give the year only if you are sure. Put names, studios and other readable credits into "credits".
+VISION_SYSTEM = """You look at frames taken from one video (a film, or one episode of a TV series): the opening,
+the middle and the end credits. Read the on-screen text exactly: the title card, credits (names, roles), studio,
+fund and channel logos. Report what you READ in "title"; if no title is readable, leave it empty.
+Separately, the file name may be an abbreviated title (vowels dropped, e.g. "LF_R_SMTHNG_LK_T" = "Life or
+Something Like It", or transliterated): put your decoding of the file name into "title_from_name" ("" if none).
+If the episode file names carry episode titles and you know which series they belong to, put the series title
+into "title_from_name". Give the year only if you are sure. Put names, studios and other credits into "credits".
 "comment": one sentence in Russian on what you saw. Answer with JSON only."""
 
 VISION_SCHEMA = {
     "type": "object",
     "properties": {"title": {"type": "string"}, "original_title": {"type": "string"},
+                   "title_from_name": {"type": "string"},
                    "year": {"type": ["integer", "null"]}, "credits": {"type": "array", "items": {"type": "string"}},
                    "comment": {"type": "string"}},
-    "required": ["title", "original_title", "year", "credits", "comment"],
+    "required": ["title", "original_title", "title_from_name", "year", "credits", "comment"],
 }
 
-CHOOSE_SYSTEM = """You pick which TMDB film a video file is, using what was read from its frames and the TMDB cards
-(year, runtime, director, producers, cast, studios, countries). Names and studios read in the credits are the
+CHOOSE_SYSTEM = """You pick which TMDB film or TV series a video is, using what was read from its frames, the file
+names and the TMDB cards (year, runtime, director, creators, producers, cast, studios, networks, countries). Names and studios read in the credits are the
 strongest evidence: a producer or studio from the credits found in a card decides it. TMDB runtimes are often
 missing or wrong (especially for Russian films): never reject a card only because of the runtime.
 Credits read from frames may contain OCR mistakes in names. If none of the cards fits, answer tmdb_id null.
@@ -195,18 +199,27 @@ CHOOSE_SCHEMA = {
 }
 
 
-def build_choose_prompt(file_name: str, duration: float, seen: dict, cards: list[dict]) -> str:
-    lines = [f"File: {file_name}, duration {int(duration // 60)} min.",
-             f"Read from the frames: title «{seen.get('title') or '?'}» / «{seen.get('original_title') or '?'}»,"
-             f" year {seen.get('year') or '?'}.",
-             "Credits read: " + ("; ".join(seen.get("credits") or []) or "—"), "", "TMDB cards:"]
+def build_choose_prompt(file_name: str, duration: float, seen: dict, cards: list[dict],
+                        other_files: list[str] | None = None) -> str:
+    lines = [f"File: {file_name}, duration {int(duration // 60)} min."]
+    if other_files:
+        lines.append("Episode files: " + "; ".join(other_files[:15]))
+    lines += [f"Read from the frames: title «{seen.get('title') or '?'}» / «{seen.get('original_title') or '?'}»,"
+              f" from the file name «{seen.get('title_from_name') or '?'}», year {seen.get('year') or '?'}.",
+              "Credits read: " + ("; ".join(seen.get("credits") or []) or "—"), "", "TMDB cards:"]
     for c in cards:
-        lines.append(f"- id {c['id']}: {c['title']} / {c['original_title']} ({c['year'] or '?'}), "
-                     f"{c['runtime'] or '?'} min, director {', '.join(c['directors']) or '?'}, "
-                     f"producers {', '.join(c.get('producers') or []) or '?'}, "
-                     f"writers {', '.join(c.get('writers') or []) or '?'}, "
-                     f"cast {', '.join(c['cast']) or '?'}, studios {', '.join(c['companies']) or '?'}, "
-                     f"countries {', '.join(x for x in c['countries'] if x) or '?'}. {c['overview']}")
+        bits = [f"{c['title']} / {c['original_title']} ({c['year'] or '?'}"
+                + (f"–{c['last_year']}" if c.get("last_year") and c.get("last_year") != c.get("year") else "") + ")"]
+        for key, label in (("runtime", "min"), ("seasons", "seasons"), ("episodes", "episodes")):
+            if c.get(key):
+                bits.append(f"{c[key]} {label}")
+        for key, label in (("directors", "director"), ("creators", "created by"), ("producers", "producers"),
+                           ("writers", "writers"), ("cast", "cast"), ("companies", "studios"),
+                           ("networks", "networks"), ("countries", "countries")):
+            vals = [v for v in c.get(key) or [] if v]
+            if vals:
+                bits.append(f"{label} {', '.join(vals)}")
+        lines.append(f"- id {c['id']}: " + ", ".join(bits) + f". {c.get('overview') or ''}")
     return "\n".join(lines)
 
 

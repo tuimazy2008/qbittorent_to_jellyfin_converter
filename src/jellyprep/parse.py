@@ -138,6 +138,30 @@ def hints_from_info(info: dict | None) -> list[str]:
     return out
 
 
+GENERIC_NAME = re.compile(
+    r"(?i)^\W*(season|сезон|series|serie|disc|disk|dvd|cd|extras?|bonus|torrent|video|movies?|films?|"
+    r"сериалы?|фильмы?|s)?[\W_]*\d{0,3}[\W_]*(сезон|season)?\W*$")
+
+
+def is_generic_name(name: str) -> bool:
+    """'Season 01', 'Сезон 2', 'Disc 1', 'S03' — a folder name that says nothing about the show."""
+    return bool(GENERIC_NAME.match(PurePath(name).stem if "." in name[-5:] else name))
+
+
+def skeleton(text: str) -> str:
+    """Consonants only: 'Life or Something Like It' and 'LF_R_SMTHNG_LK_T' both give 'lfrsmthnglkt'."""
+    return re.sub(r"[^a-z]|[aeiouy]", "", text.lower())
+
+
+def disemvoweled(name: str) -> str | None:
+    """The title part of a file name written without vowels ('LF_R_SMTHNG_LK_T_2002_720p…'), else None."""
+    head = re.split(r"[ ._-](?:19|20)\d\d(?:[ ._-]|$)", PurePath(name).stem)[0]
+    letters = re.sub(r"[^A-Za-z]", "", head)
+    if len(letters) >= 6 and not re.search(r"[AEIOUaeiou]", letters):
+        return head
+    return None
+
+
 def guess_kind(name: str) -> str:
     return "tv" if guessit(name).get("type") == "episode" else "movie"
 
